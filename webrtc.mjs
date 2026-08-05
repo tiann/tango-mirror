@@ -142,7 +142,10 @@ export function createRtcSession({ sendSignal, onControl, log }) {
     let connected = false;
     pc.connectionStateChange.subscribe((state) => {
         log?.(`webrtc: ${state}`);
+        const wasConnected = connected;
         connected = state === "connected";
+        // request an IDR immediately so the first P2P frames are decodable
+        if (connected && !wasConnected) onKeyframeRequest?.();
     });
 
     const packetizer = new H264Packetizer();

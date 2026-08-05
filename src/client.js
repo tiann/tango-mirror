@@ -84,6 +84,8 @@ function connect(serial) {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/api/stream?serial=${encodeURIComponent(serial)}`);
     ws.binaryType = "arraybuffer";
+    // negotiate WebRTC immediately, in parallel with scrcpy startup
+    ws.onopen = () => tryWebRtc();
 
     ws.onmessage = async (ev) => {
         if (typeof ev.data === "string") {
@@ -91,7 +93,6 @@ function connect(serial) {
             if (msg.type === "meta") {
                 setStatus(`${serial} — ${msg.width}x${msg.height}, scrcpy v${msg.serverVersion}`);
                 startDecoder(msg.codec);
-                tryWebRtc();
             } else if (msg.type === "size") {
                 setStatus(`${serial} — ${msg.width}x${msg.height}`);
             } else if (msg.type === "error") {

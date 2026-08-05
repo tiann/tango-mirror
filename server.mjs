@@ -95,6 +95,83 @@ wss.on("connection", async (ws, req) => {
     const log = (...a) => console.log(`[${serial}]`, ...a);
     let scrcpy;
     let rtc = null;
+    let controller = null;
+    let video = null;
+    let videoPath = "ws";
+    let lastConfig = null;
+
+    const sendSignal = (obj) => {
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
+    };
+    const requestKeyframe = () => {
+        controller?.resetVideo().catch(() => {});
+    };
+
+    const handleControl = (msg) => {
+        if (!controller || !video) return;
+        (async () => {
+            if (msg.t === "touch") {
+                await controller.injectTouch({
+                    action: ACTION_MAP[msg.a],
+                    pointerId: ScrcpyPointerId.Finger,
+                    pointerX: msg.x * video.width,
+                    pointerY: msg.y * video.height,
+                    videoWidth: video.width,
+                    videoHeight: video.height,
+                    pressure: msg.a === "up" ? 0 : 1,
+                    buttons: msg.a === "up" ? 0 : 1,
+                });
+            } else if (msg.t === "scroll") {
+                await controller.injectScroll({
+                    pointerX: msg.x * video.width,
+                    pointerY: msg.y * video.height,
+                    videoWidth: video.width,
+                    videoHeight: video.height,
+                    scrollX: msg.dx,
+                    scrollY: msg.dy,
+                    buttons: 0,
+                });
+            } else if (msg.t === "key") {
+                await controller.injectKeyCode({
+                    action: msg.a === "up" ? 1 : 0,
+                    keyCode: msg.code,
+                    repeat: 0,
+                    metaState: 0,
+                });
+            } else if (msg.t === "text") {
+                await controller.injectText(msg.text);
+            }
+        })().catch((e) => log("control error:", e.message));
+    };
+
+    // registered before scrcpy startup so WebRTC negotiation runs in parallel
+    ws.on("message", (data, isBinary) => {
+        if (isBinary) return;
+        let msg;
+        try {
+            msg = JSON.parse(data.toString());
+        } catch {
+            return;
+        }
+        if (msg.t === "rtc-start") {
+            rtc?.close();
+            rtc = createRtcSession({ sendSignal, onControl: handleControl, log });
+            rtc.onKeyframeRequest = requestKeyframe;
+            if (lastConfig) rtc.sendVideoPacket(lastConfig);
+            rtc.start().catch((e) => log("webrtc offer error:", e.message));
+        } else if (msg.t === "rtc-answer") {
+            rtc?.handleAnswer(msg.sdp).catch((e) => log("webrtc answer error:", e.message));
+        } else if (msg.t === "rtc-ice") {
+            rtc?.handleIce(msg.candidate);
+        } else if (msg.t === "video-path") {
+            videoPath = msg.mode === "rtc" ? "rtc" : "ws";
+            log(`video path: ${videoPath}`);
+            if (videoPath === "rtc") requestKeyframe();
+        } else {
+            handleControl(msg);
+        }
+    });
+
     try {
         const transport = await adbClient.createTransport({ serial });
         const adb = new Adb(transport);
@@ -119,7 +196,8 @@ wss.on("connection", async (ws, req) => {
         scrcpy = await AdbScrcpyClient.start(adb, SERVER_PATH, options);
         scrcpy.output.pipeTo(new WritableStreamStd((line) => log("server:", line))).catch(() => {});
 
-        const video = await scrcpy.videoStream;
+        video = await scrcpy.videoStream;
+        controller = scrcpy.controller;
         log(`stream started codec=${video.metadata.codec} ${video.width}x${video.height}`);
         ws.send(JSON.stringify({
             type: "meta",
@@ -131,80 +209,6 @@ wss.on("connection", async (ws, req) => {
         video.sizeChanged((size) => {
             if (ws.readyState === ws.OPEN) {
                 ws.send(JSON.stringify({ type: "size", ...size }));
-            }
-        });
-
-        const controller = scrcpy.controller;
-
-        const handleControl = (msg) => {
-            (async () => {
-                if (msg.t === "touch") {
-                    await controller.injectTouch({
-                        action: ACTION_MAP[msg.a],
-                        pointerId: ScrcpyPointerId.Finger,
-                        pointerX: msg.x * video.width,
-                        pointerY: msg.y * video.height,
-                        videoWidth: video.width,
-                        videoHeight: video.height,
-                        pressure: msg.a === "up" ? 0 : 1,
-                        buttons: msg.a === "up" ? 0 : 1,
-                    });
-                } else if (msg.t === "scroll") {
-                    await controller.injectScroll({
-                        pointerX: msg.x * video.width,
-                        pointerY: msg.y * video.height,
-                        videoWidth: video.width,
-                        videoHeight: video.height,
-                        scrollX: msg.dx,
-                        scrollY: msg.dy,
-                        buttons: 0,
-                    });
-                } else if (msg.t === "key") {
-                    await controller.injectKeyCode({
-                        action: msg.a === "up" ? 1 : 0,
-                        keyCode: msg.code,
-                        repeat: 0,
-                        metaState: 0,
-                    });
-                } else if (msg.t === "text") {
-                    await controller.injectText(msg.text);
-                }
-            })().catch((e) => log("control error:", e.message));
-        };
-
-        let videoPath = "ws";
-        let lastConfig = null;
-        const requestKeyframe = () => {
-            controller.resetVideo().catch(() => {});
-        };
-        const sendSignal = (obj) => {
-            if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
-        };
-
-        ws.on("message", (data, isBinary) => {
-            if (isBinary) return;
-            let msg;
-            try {
-                msg = JSON.parse(data.toString());
-            } catch {
-                return;
-            }
-            if (msg.t === "rtc-start") {
-                rtc?.close();
-                rtc = createRtcSession({ sendSignal, onControl: handleControl, log });
-                rtc.onKeyframeRequest = requestKeyframe;
-                if (lastConfig) rtc.sendVideoPacket(lastConfig);
-                rtc.start().catch((e) => log("webrtc offer error:", e.message));
-            } else if (msg.t === "rtc-answer") {
-                rtc?.handleAnswer(msg.sdp).catch((e) => log("webrtc answer error:", e.message));
-            } else if (msg.t === "rtc-ice") {
-                rtc?.handleIce(msg.candidate);
-            } else if (msg.t === "video-path") {
-                videoPath = msg.mode === "rtc" ? "rtc" : "ws";
-                log(`video path: ${videoPath}`);
-                if (videoPath === "rtc") requestKeyframe();
-            } else {
-                handleControl(msg);
             }
         });
 
