@@ -2,7 +2,7 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, delimiter } from "node:path";
@@ -215,8 +215,8 @@ function WritableStreamStd(fn) {
     return new WritableStream({ write: fn });
 }
 
-function findCloudflared() {
-    if (process.env.CLOUDFLARED_PATH) return process.env.CLOUDFLARED_PATH;
+function findBinary(name, envVar) {
+    if (envVar && process.env[envVar]) return process.env[envVar];
     const dirs = [
         ...(process.env.PATH ?? "").split(delimiter),
         join(homedir(), "bin"),
@@ -225,41 +225,127 @@ function findCloudflared() {
         "/opt/homebrew/bin",
     ];
     for (const dir of dirs) {
-        const p = join(dir, "cloudflared");
+        const p = join(dir, name);
         if (dir && existsSync(p)) return p;
     }
     return undefined;
 }
 
-function startTunnel() {
-    const bin = findCloudflared();
-    if (!bin) {
-        console.error(
-            "--tunnel: cloudflared not found in PATH.\n" +
-            "Install it from https://github.com/cloudflare/cloudflared/releases\n" +
-            "or set CLOUDFLARED_PATH to the binary location.",
-        );
-        process.exit(1);
+// --tunnel [tunwg|cloudflared]; bare --tunnel picks the first backend found
+function tunnelBackend() {
+    const i = process.argv.findIndex((a) => a === "--tunnel" || a.startsWith("--tunnel="));
+    if (i === -1) return undefined;
+    const arg = process.argv[i];
+    if (arg.includes("=")) return arg.split("=")[1];
+    const next = process.argv[i + 1];
+    if (next === "tunwg" || next === "cloudflared") return next;
+    return "auto";
+}
+
+// some tunwg relays require an auth key from POST /issue; fetch once and cache
+async function issueTunwgKey(api) {
+    const cacheDir = join(homedir(), ".config", "tango-mirror");
+    const cacheFile = join(cacheDir, `tunwg-auth-${api.replace(/[^A-Za-z0-9.-]/g, "_")}`);
+    if (existsSync(cacheFile)) return (await readFile(cacheFile, "utf8")).trim();
+    const res = await fetch(`https://${api}/issue`, { method: "POST" });
+    if (res.status === 404) return undefined; // relay does not use issued keys
+    if (!res.ok) throw new Error(`POST https://${api}/issue: HTTP ${res.status}`);
+    const { key } = await res.json();
+    await mkdir(cacheDir, { recursive: true });
+    await writeFile(cacheFile, key, { mode: 0o600 });
+    console.log(`tunwg: issued auth key from ${api}, cached in ${cacheFile}`);
+    return key;
+}
+
+const TUNNEL_BACKENDS = {
+    tunwg: {
+        envVar: "TUNWG_BIN",
+        install: "https://github.com/tiann/tunwg/releases",
+        args: (port) => {
+            const args = [`--forward=http://localhost:${port}`];
+            const auth = argValue("--tunnel-auth"); // user:password, forwarded to tunwg basic auth
+            if (auth) args.push("-limit", auth.replace(":", " "));
+            return args;
+        },
+        urlPattern: /url=(https:\/\/\S+)/,
+        env: async () => {
+            const env = {};
+            const api = argValue("--tunnel-api") ?? process.env.TUNWG_API;
+            if (api) env.TUNWG_API = api;
+            if (api && !process.env.TUNWG_AUTH) {
+                try {
+                    const key = await issueTunwgKey(api);
+                    if (key) env.TUNWG_AUTH = key;
+                } catch (e) {
+                    console.warn(`tunwg: auth key auto-issue failed (${e.message}), continuing without`);
+                }
+            }
+            return env;
+        },
+    },
+    cloudflared: {
+        envVar: "CLOUDFLARED_PATH",
+        install: "https://github.com/cloudflare/cloudflared/releases",
+        args: (port) => ["tunnel", "--url", `http://localhost:${port}`],
+        urlPattern: /https:\/\/[a-z0-9-]+\.trycloudflare\.com/,
+    },
+};
+
+async function startTunnel(backendName) {
+    let name = backendName;
+    let bin;
+    if (name === "auto") {
+        for (const candidate of ["tunwg", "cloudflared"]) {
+            bin = findBinary(candidate, TUNNEL_BACKENDS[candidate].envVar);
+            if (bin) {
+                name = candidate;
+                break;
+            }
+        }
+        if (!bin) {
+            console.error(
+                "--tunnel: neither tunwg nor cloudflared found in PATH.\n" +
+                `tunwg (end-to-end encrypted):  ${TUNNEL_BACKENDS.tunwg.install}\n` +
+                `cloudflared:                   ${TUNNEL_BACKENDS.cloudflared.install}`,
+            );
+            process.exit(1);
+        }
+    } else {
+        const backend = TUNNEL_BACKENDS[name];
+        if (!backend) {
+            console.error(`--tunnel: unknown backend "${name}" (use tunwg or cloudflared)`);
+            process.exit(1);
+        }
+        bin = findBinary(name, backend.envVar);
+        if (!bin) {
+            console.error(`--tunnel: ${name} not found in PATH; install from ${backend.install}`);
+            process.exit(1);
+        }
     }
-    const child = spawn(bin, ["tunnel", "--url", `http://localhost:${PORT}`], {
+    const backend = TUNNEL_BACKENDS[name];
+    console.log(`starting ${name} tunnel...`);
+    const child = spawn(bin, backend.args(PORT), {
         stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, ...((await backend.env?.()) ?? {}) },
     });
     let shuttingDown = false;
     let announced = false;
     const scan = (chunk) => {
         if (announced) return;
-        const m = String(chunk).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+        const m = String(chunk).match(backend.urlPattern);
         if (m) {
             announced = true;
-            console.log(`public URL: ${m[0]}`);
-            console.log("note: this URL is public and unauthenticated — share carefully");
+            console.log(`public URL: ${m[1] ?? m[0]}`);
+            if (name === "cloudflared") {
+                console.log("note: this URL is public and unauthenticated — share carefully");
+            }
         }
     };
     child.stdout.on("data", scan);
     child.stderr.on("data", scan);
     child.on("exit", (code) => {
         if (!shuttingDown) {
-            console.error(`cloudflared exited with code ${code}`);
+            console.error(`${name} exited with code ${code}`);
         }
     });
     const cleanup = () => {
@@ -273,5 +359,12 @@ function startTunnel() {
 
 httpServer.listen(PORT, () => {
     console.log(`tango-mirror listening on http://localhost:${PORT} (scrcpy server v${VERSION})`);
-    if (process.argv.includes("--tunnel")) startTunnel();
+    const backend = tunnelBackend();
+    if (backend) {
+        startTunnel(backend).catch((e) => console.error("tunnel failed:", e));
+    }
+});
+
+process.on("unhandledRejection", (e) => {
+    console.error("unhandled rejection:", e);
 });

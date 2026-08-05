@@ -12,13 +12,25 @@ On the machine where `adb` runs (devices already connected via `adb connect` or 
 ```bash
 npx tango-mirror              # default port 8010
 npx tango-mirror --port 9000
-npx tango-mirror --tunnel     # also start a cloudflared quick tunnel
-                              # and print the public trycloudflare.com URL
+
+# expose to the internet (tunnel backend auto-detected: tunwg > cloudflared)
+npx tango-mirror --tunnel
+npx tango-mirror --tunnel tunwg --tunnel-api relay.example.com --tunnel-auth user:pass
+npx tango-mirror --tunnel cloudflared
 ```
 
-Then open `http://localhost:8010`, or use the tunnel URL printed by
-`--tunnel` (requires [cloudflared](https://github.com/cloudflare/cloudflared/releases)
-installed; the URL is public and unauthenticated — share carefully).
+Then open `http://localhost:8010`, or use the public URL printed by `--tunnel`.
+
+Two tunnel backends are supported:
+
+- [tunwg](https://github.com/tiann/tunwg) (preferred): **end-to-end encrypted**
+  (the relay only routes TLS bytes by SNI — it cannot see your screen), stable
+  URL across restarts, optional built-in basic auth via `--tunnel-auth`.
+  If the relay requires issued keys, one is requested from `POST /issue`
+  automatically and cached under `~/.config/tango-mirror/`.
+- [cloudflared](https://github.com/cloudflare/cloudflared/releases): zero-config
+  quick tunnel; note the URL is random per run, unauthenticated, and TLS
+  terminates at Cloudflare's edge (they can see the traffic).
 
 Note: the page uses WebCodecs, which requires a secure context
 (`https://` or `localhost`).
@@ -30,7 +42,10 @@ Note: the page uses WebCodecs, which requires a secure context
 | `--port`, `-p` | `PORT` | `8010` | HTTP/WebSocket listen port |
 | `--adb-host` | `ADB_HOST` | `127.0.0.1` | adb server host |
 | `--adb-port` | `ADB_PORT` | `5037` | adb server port |
-| `--tunnel` | — | off | expose via cloudflared quick tunnel |
+| `--tunnel [backend]` | — | off | expose publicly; backend `tunwg`, `cloudflared`, or auto |
+| `--tunnel-api` | `TUNWG_API` | `l.tunwg.com` | tunwg relay server |
+| `--tunnel-auth` | — | off | basic auth `user:pass` (tunwg only) |
+| — | `TUNWG_BIN` | auto-detect | tunwg binary location |
 | — | `CLOUDFLARED_PATH` | auto-detect | cloudflared binary location |
 
 ## How it works
