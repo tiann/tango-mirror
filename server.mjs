@@ -56,6 +56,8 @@ const MIME = {
 const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname === "/api/devices") {
+        // page may be served from static hosting (e.g. GitHub Pages)
+        res.setHeader("access-control-allow-origin", "*");
         try {
             const devices = await adbClient.getDevices();
             res.writeHead(200, { "content-type": "application/json" });

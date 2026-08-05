@@ -9,6 +9,26 @@ const ICE_SERVERS = [
     { urls: "stun:stun.l.google.com:19302" },
 ];
 
+// backend resolution: ?server= param > saved value > same-origin.
+// lets the static page live on GitHub Pages while the backend sits
+// behind a tunnel; the ⚙ button changes it at runtime.
+const backendParam = new URLSearchParams(location.search).get("server");
+if (backendParam !== null) {
+    localStorage.setItem("tango-backend", backendParam.replace(/^[a-z]+:\/\//, "").replace(/\/$/, ""));
+}
+const BACKEND = localStorage.getItem("tango-backend") || "";
+const HTTP_BASE = BACKEND ? `https://${BACKEND}` : "";
+const WS_BASE = BACKEND
+    ? `wss://${BACKEND}`
+    : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
+
+function promptBackend() {
+    const input = prompt("后端地址（tango-mirror 服务的域名，如 xxx.relay.hapi.run）：", BACKEND);
+    if (input === null) return;
+    localStorage.setItem("tango-backend", input.trim().replace(/^[a-z]+:\/\//, "").replace(/\/$/, ""));
+    location.reload();
+}
+
 const $ = (id) => document.getElementById(id);
 const deviceSelect = $("device-select");
 const qualitySelect = $("quality-select");
@@ -42,10 +62,16 @@ function setBadge(text, cls = "") {
 }
 
 async function loadDevices() {
+    // static hosting (e.g. GitHub Pages) needs a backend configured first
+    if (!BACKEND && location.hostname.endsWith("github.io")) {
+        deviceSelect.innerHTML = "<option value=''>请先设置后端地址（⚙）</option>";
+        promptBackend();
+        return;
+    }
     deviceSelect.innerHTML = "<option value=''>加载设备中…</option>";
     let devices = [];
     try {
-        devices = await (await fetch("/api/devices")).json();
+        devices = await (await fetch(`${HTTP_BASE}/api/devices`)).json();
     } catch {
         deviceSelect.innerHTML = "<option value=''>加载失败，点 ⟳ 重试</option>";
         return;
@@ -110,8 +136,7 @@ function connect(serial) {
     disconnect();
     currentSerial = serial;
     setBadge("连接中…");
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}/api/stream?serial=${encodeURIComponent(serial)}`);
+    ws = new WebSocket(`${WS_BASE}/api/stream?serial=${encodeURIComponent(serial)}`);
     ws.binaryType = "arraybuffer";
     // negotiate WebRTC immediately, in parallel with scrcpy startup
     ws.onopen = () => tryWebRtc();
@@ -367,6 +392,8 @@ $("btn-fullscreen").onclick = () => {
     if (document.fullscreenElement) document.exitFullscreen();
     else document.documentElement.requestFullscreen?.();
 };
+
+$("btn-settings").onclick = promptBackend;
 
 deviceSelect.onchange = () => {
     if (deviceSelect.value) connect(deviceSelect.value);
