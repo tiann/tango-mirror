@@ -61,6 +61,22 @@ browser ──HTTP/WS──▶ tango-mirror (Node)──TCP──▶ adb server 
 There is no transcoding: the device's hardware H.264 encoder output is
 relayed as-is to the browser, which decodes it with WebCodecs.
 
+### WebRTC P2P mode (automatic)
+
+After the WebSocket stream starts, the client automatically attempts a
+WebRTC connection (signaling rides the existing WebSocket, so it works
+through any tunnel). When ICE succeeds, video switches to a direct
+peer-to-peer SRTP path — the tunnel then carries only a few KB of
+signaling, which makes bandwidth-limited tunnels (e.g. tunwg's
+end-to-end-encrypted relay) practical: use the tunnel for the page and
+signaling, and let the video bytes flow browser⇆host directly.
+
+- Same H.264 stream, repacketized as RFC 6184 RTP (still no transcoding)
+- Touch/key input moves to a DataChannel; browser PLI feedback triggers
+  scrcpy keyframe resets
+- If ICE fails or the connection drops, video falls back to the
+  WebSocket path automatically (status shows `[P2P]` / `[WS]`)
+
 ## License
 
 MIT. Bundles the [scrcpy](https://github.com/Genymobile/scrcpy) server

@@ -12,6 +12,7 @@ import { AdbServerNodeTcpConnector } from "@yume-chan/adb-server-node-tcp";
 import { AdbScrcpyClient, AdbScrcpyOptions3_1 } from "@yume-chan/adb-scrcpy";
 import { ReadableStream } from "@yume-chan/stream-extra";
 import { ScrcpyPointerId, AndroidMotionEventAction } from "@yume-chan/scrcpy";
+import { createRtcSession } from "./webrtc.mjs";
 
 function argValue(...names) {
     for (const name of names) {
@@ -93,6 +94,7 @@ wss.on("connection", async (ws, req) => {
     const serial = new URL(req.url, "http://localhost").searchParams.get("serial");
     const log = (...a) => console.log(`[${serial}]`, ...a);
     let scrcpy;
+    let rtc = null;
     try {
         const transport = await adbClient.createTransport({ serial });
         const adb = new Adb(transport);
@@ -134,14 +136,7 @@ wss.on("connection", async (ws, req) => {
 
         const controller = scrcpy.controller;
 
-        ws.on("message", (data, isBinary) => {
-            if (isBinary) return;
-            let msg;
-            try {
-                msg = JSON.parse(data.toString());
-            } catch {
-                return;
-            }
+        const handleControl = (msg) => {
             (async () => {
                 if (msg.t === "touch") {
                     await controller.injectTouch({
@@ -175,6 +170,42 @@ wss.on("connection", async (ws, req) => {
                     await controller.injectText(msg.text);
                 }
             })().catch((e) => log("control error:", e.message));
+        };
+
+        let videoPath = "ws";
+        let lastConfig = null;
+        const requestKeyframe = () => {
+            controller.resetVideo().catch(() => {});
+        };
+        const sendSignal = (obj) => {
+            if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
+        };
+
+        ws.on("message", (data, isBinary) => {
+            if (isBinary) return;
+            let msg;
+            try {
+                msg = JSON.parse(data.toString());
+            } catch {
+                return;
+            }
+            if (msg.t === "rtc-start") {
+                rtc?.close();
+                rtc = createRtcSession({ sendSignal, onControl: handleControl, log });
+                rtc.onKeyframeRequest = requestKeyframe;
+                if (lastConfig) rtc.sendVideoPacket(lastConfig);
+                rtc.start().catch((e) => log("webrtc offer error:", e.message));
+            } else if (msg.t === "rtc-answer") {
+                rtc?.handleAnswer(msg.sdp).catch((e) => log("webrtc answer error:", e.message));
+            } else if (msg.t === "rtc-ice") {
+                rtc?.handleIce(msg.candidate);
+            } else if (msg.t === "video-path") {
+                videoPath = msg.mode === "rtc" ? "rtc" : "ws";
+                log(`video path: ${videoPath}`);
+                if (videoPath === "rtc") requestKeyframe();
+            } else {
+                handleControl(msg);
+            }
         });
 
         const reader = video.stream.getReader();
@@ -182,6 +213,17 @@ wss.on("connection", async (ws, req) => {
         while (true) {
             const { done, value: packet } = await reader.read();
             if (done || ws.readyState !== ws.OPEN) break;
+            if (packet.type === "configuration") lastConfig = packet;
+            if (rtc) {
+                try {
+                    if (packet.type === "configuration" || rtc.connected) {
+                        rtc.sendVideoPacket(packet);
+                    }
+                } catch (e) {
+                    log("webrtc send error:", e.message);
+                }
+            }
+            if (videoPath === "rtc" && packet.type !== "configuration") continue;
             const buf = new Uint8Array(HEADER + packet.data.length);
             const dv = new DataView(buf.buffer);
             if (packet.type === "configuration") {
@@ -202,6 +244,7 @@ wss.on("connection", async (ws, req) => {
         }
     } finally {
         ws.close();
+        rtc?.close();
         try {
             await scrcpy?.close();
         } catch {}

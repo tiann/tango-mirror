@@ -38,6 +38,7 @@
     "@yume-chan/fetch-scrcpy-server": "^1.0.0",
     "@yume-chan/scrcpy": "^2.3.0",
     "@yume-chan/stream-extra": "^2.6.1",
+    "werift": "^0.24.3",
     "ws": "^8.21.2"
   },
   "devDependencies": {
