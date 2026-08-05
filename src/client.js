@@ -23,6 +23,7 @@ let pc = null;
 let dc = null;
 let videoEl = null;
 let path = "ws"; // "ws" | "rtc"
+let statsTimer = null;
 
 function setStatus(text) {
     statusEl.textContent = `${text}${currentSerial ? ` [${path === "rtc" ? "P2P" : "WS"}]` : ""}`;
@@ -50,6 +51,8 @@ function sendControl(obj) {
 }
 
 function teardownRtc() {
+    clearInterval(statsTimer);
+    statsTimer = null;
     dc = null;
     pc?.close();
     pc = null;
@@ -133,9 +136,11 @@ function startDecoder(codec) {
     decoder = new WebCodecsVideoDecoder({ codec, renderer });
     writer = decoder.writable.getWriter();
 
+    // replace only the previous canvas — the WebRTC <video> may already be
+    // in the stage (negotiation runs in parallel with scrcpy startup)
+    canvas?.remove();
     canvas = renderer.canvas;
     canvas.className = "screen";
-    stageEl.innerHTML = "";
     stageEl.appendChild(canvas);
     attachInput(canvas);
 }
@@ -160,33 +165,72 @@ async function acceptRtcOffer(sdp) {
     };
     pc.ontrack = (e) => {
         videoEl = document.createElement("video");
-        videoEl.className = "screen";
+        videoEl.className = "screen-video";
         videoEl.autoplay = true;
         videoEl.muted = true;
         videoEl.playsInline = true;
-        videoEl.style.display = "none";
         videoEl.srcObject = e.streams[0] ?? new MediaStream([e.track]);
         stageEl.appendChild(videoEl);
+        videoEl.play().catch((err) => console.warn("video.play() rejected:", err));
         attachInput(videoEl);
-        // switch to the P2P path once real frames are decoding
-        const onFrame = () => {
-            if (!videoEl || path === "rtc") return;
-            path = "rtc";
-            if (canvas) canvas.style.display = "none";
-            videoEl.style.display = "";
-            sendWs({ t: "video-path", mode: "rtc" });
-            setStatus(`${currentSerial} — ${videoEl.videoWidth}x${videoEl.videoHeight}`);
-        };
-        if (videoEl.requestVideoFrameCallback) {
-            videoEl.requestVideoFrameCallback(onFrame);
-        } else {
-            videoEl.addEventListener("resize", onFrame, { once: true });
-        }
+        watchRtcStats();
     };
     await pc.setRemoteDescription({ type: "offer", sdp });
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     sendWs({ t: "rtc-answer", sdp: answer.sdp });
+}
+
+// switch paths based on real decode progress from getStats(); keeps a live
+// packets/frames readout in the status bar so failures are diagnosable
+function watchRtcStats() {
+    let lastFrames = 0;
+    let lastTime = performance.now();
+    let ticksWithoutDecode = 0;
+    clearInterval(statsTimer);
+    statsTimer = setInterval(async () => {
+        if (!pc) return;
+        const stats = await pc.getStats();
+        let inbound = null;
+        stats.forEach((s) => {
+            if (s.type === "inbound-rtp" && s.kind === "video") inbound = s;
+        });
+        if (!inbound) return;
+        const { packetsReceived = 0, framesDecoded = 0, framesReceived = 0, pliCount = 0 } = inbound;
+        if (path !== "rtc") {
+            if (framesDecoded > 0 && videoEl) {
+                path = "rtc";
+                if (canvas) canvas.style.display = "none";
+                videoEl.play?.().catch(() => {});
+                sendWs({ t: "video-path", mode: "rtc" });
+                console.log("switched to P2P; video state:", {
+                    readyState: videoEl.readyState,
+                    paused: videoEl.paused,
+                    currentTime: videoEl.currentTime,
+                    videoWidth: videoEl.videoWidth,
+                });
+                setStatus(`${currentSerial} — ${videoEl.videoWidth}x${videoEl.videoHeight}`);
+            } else {
+                ticksWithoutDecode++;
+                if (ticksWithoutDecode === 10) {
+                    console.warn("webrtc: no decoded frames after 5s", inbound);
+                    setStatus(
+                        `${currentSerial} — P2P stalled: pkts=${packetsReceived} recv=${framesReceived} dec=${framesDecoded} pli=${pliCount}`,
+                    );
+                }
+                if (ticksWithoutDecode >= 20) {
+                    console.warn("webrtc: giving up, staying on WebSocket path");
+                    teardownRtc();
+                }
+            }
+            return;
+        }
+        const now = performance.now();
+        const fps = Math.round(((framesDecoded - lastFrames) * 1000) / (now - lastTime));
+        lastFrames = framesDecoded;
+        lastTime = now;
+        setStatus(`${currentSerial} — ${videoEl?.videoWidth}x${videoEl?.videoHeight} ${fps}fps dec=${framesDecoded} pli=${pliCount}`);
+    }, 500);
 }
 
 // normalized [0,1] coordinates; accounts for letterboxing in <video>

@@ -9,8 +9,11 @@
     body { margin: 0; font-family: system-ui, sans-serif; display: flex; flex-direction: column; height: 100vh; }
     header { padding: 8px 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid #8884; }
     #status { font-size: 12px; opacity: .7; margin-left: auto; }
-    #stage { flex: 1; display: flex; justify-content: center; align-items: center; overflow: hidden; background: #111; }
-    .screen { max-width: 100%; max-height: 100%; width: auto; height: 100%; touch-action: none; object-fit: contain; }
+    #stage { flex: 1; position: relative; display: flex; justify-content: center; align-items: center; overflow: hidden; background: #111; }
+    .screen { max-width: 100%; max-height: 100%; width: auto; height: 100%; touch-action: none; object-fit: contain; position: relative; z-index: 1; }
+    /* P2P video sits visible underneath the canvas so Chrome keeps its
+       render pipeline warm; switching just removes the canvas on top */
+    .screen-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; z-index: 0; touch-action: none; }
     button { padding: 4px 10px; }
 </style>
 </head>
