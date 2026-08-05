@@ -9,9 +9,12 @@ const ICE_SERVERS = [
     { urls: "stun:stun.l.google.com:19302" },
 ];
 
-const deviceListEl = document.getElementById("devices");
-const stageEl = document.getElementById("stage");
-const statusEl = document.getElementById("status");
+const $ = (id) => document.getElementById(id);
+const deviceSelect = $("device-select");
+const stageEl = $("stage");
+const badgeEl = $("status-badge");
+const kbdBar = $("kbdbar");
+const kbdInput = $("kbd-input");
 
 let ws = null;
 let decoder = null;
@@ -24,20 +27,36 @@ let dc = null;
 let videoEl = null;
 let path = "ws"; // "ws" | "rtc"
 let statsTimer = null;
+let lastSize = "";
 
-function setStatus(text) {
-    statusEl.textContent = `${text}${currentSerial ? ` [${path === "rtc" ? "P2P" : "WS"}]` : ""}`;
+function setBadge(text, cls = "") {
+    badgeEl.hidden = !text;
+    badgeEl.textContent = text;
+    badgeEl.className = cls;
 }
 
 async function loadDevices() {
-    const res = await fetch("/api/devices");
-    const devices = await res.json();
-    deviceListEl.innerHTML = "";
+    deviceSelect.innerHTML = "<option value=''>加载设备中…</option>";
+    let devices = [];
+    try {
+        devices = await (await fetch("/api/devices")).json();
+    } catch {
+        deviceSelect.innerHTML = "<option value=''>加载失败，点 ⟳ 重试</option>";
+        return;
+    }
+    deviceSelect.innerHTML = "<option value=''>选择设备…</option>";
     for (const d of devices) {
-        const btn = document.createElement("button");
-        btn.textContent = `${d.model ?? d.product ?? "device"} (${d.serial})`;
-        btn.onclick = () => connect(d.serial);
-        deviceListEl.appendChild(btn);
+        const opt = document.createElement("option");
+        opt.value = d.serial;
+        opt.textContent = `${d.model?.replaceAll("_", " ") ?? d.product ?? "设备"} · ${d.serial}`;
+        deviceSelect.appendChild(opt);
+    }
+    // one device only: connect right away, no extra tap needed
+    if (devices.length === 1) {
+        deviceSelect.value = devices[0].serial;
+        connect(devices[0].serial);
+    } else if (currentSerial && devices.some((d) => d.serial === currentSerial)) {
+        deviceSelect.value = currentSerial;
     }
 }
 
@@ -62,7 +81,7 @@ function teardownRtc() {
         path = "ws";
         if (canvas) canvas.style.display = "";
         sendWs({ t: "video-path", mode: "ws" });
-        setStatus(`${currentSerial} — fell back to WebSocket video`);
+        setBadge(`${lastSize} · WS`);
     }
 }
 
@@ -78,12 +97,13 @@ function disconnect() {
     currentSerial = null;
     path = "ws";
     stageEl.innerHTML = "";
+    setBadge("");
 }
 
 function connect(serial) {
     disconnect();
     currentSerial = serial;
-    setStatus(`connecting to ${serial}...`);
+    setBadge("连接中…");
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/api/stream?serial=${encodeURIComponent(serial)}`);
     ws.binaryType = "arraybuffer";
@@ -94,12 +114,13 @@ function connect(serial) {
         if (typeof ev.data === "string") {
             const msg = JSON.parse(ev.data);
             if (msg.type === "meta") {
-                setStatus(`${serial} — ${msg.width}x${msg.height}, scrcpy v${msg.serverVersion}`);
                 startDecoder(msg.codec);
+                setBadge("WS");
             } else if (msg.type === "size") {
-                setStatus(`${serial} — ${msg.width}x${msg.height}`);
+                lastSize = `${msg.width}×${msg.height}`;
+                if (path !== "rtc") setBadge(`${lastSize} · WS`);
             } else if (msg.type === "error") {
-                setStatus(`error: ${msg.message}`);
+                setBadge(`出错：${msg.message}`, "error");
             } else if (msg.t === "rtc-offer") {
                 acceptRtcOffer(msg.sdp).catch((e) => {
                     console.warn("webrtc setup failed:", e);
@@ -120,10 +141,12 @@ function connect(serial) {
         try {
             await writer.write(packet);
         } catch (e) {
-            setStatus(`decode error: ${e.message}`);
+            setBadge(`解码出错：${e.message}`, "error");
         }
     };
-    ws.onclose = () => setStatus(`${serial} disconnected`);
+    ws.onclose = () => {
+        if (currentSerial === serial) setBadge("连接已断开", "error");
+    };
 }
 
 function startDecoder(codec) {
@@ -182,7 +205,7 @@ async function acceptRtcOffer(sdp) {
 }
 
 // switch paths based on real decode progress from getStats(); keeps a live
-// packets/frames readout in the status bar so failures are diagnosable
+// readout in the status badge so failures are diagnosable
 function watchRtcStats() {
     let lastFrames = 0;
     let lastTime = performance.now();
@@ -203,20 +226,11 @@ function watchRtcStats() {
                 if (canvas) canvas.style.display = "none";
                 videoEl.play?.().catch(() => {});
                 sendWs({ t: "video-path", mode: "rtc" });
-                console.log("switched to P2P; video state:", {
-                    readyState: videoEl.readyState,
-                    paused: videoEl.paused,
-                    currentTime: videoEl.currentTime,
-                    videoWidth: videoEl.videoWidth,
-                });
-                setStatus(`${currentSerial} — ${videoEl.videoWidth}x${videoEl.videoHeight}`);
             } else {
                 ticksWithoutDecode++;
                 if (ticksWithoutDecode === 10) {
                     console.warn("webrtc: no decoded frames after 5s", inbound);
-                    setStatus(
-                        `${currentSerial} — P2P stalled: pkts=${packetsReceived} recv=${framesReceived} dec=${framesDecoded} pli=${pliCount}`,
-                    );
+                    console.warn(`p2p stalled: pkts=${packetsReceived} recv=${framesReceived} dec=${framesDecoded} pli=${pliCount}`);
                 }
                 if (ticksWithoutDecode >= 20) {
                     console.warn("webrtc: giving up, staying on WebSocket path");
@@ -229,7 +243,8 @@ function watchRtcStats() {
         const fps = Math.round(((framesDecoded - lastFrames) * 1000) / (now - lastTime));
         lastFrames = framesDecoded;
         lastTime = now;
-        setStatus(`${currentSerial} — ${videoEl?.videoWidth}x${videoEl?.videoHeight} ${fps}fps dec=${framesDecoded} pli=${pliCount}`);
+        const size = videoEl?.videoWidth ? `${videoEl.videoWidth}×${videoEl.videoHeight}` : lastSize;
+        setBadge(`${size} · P2P ${fps}fps`, "p2p");
     }, 500);
 }
 
@@ -274,26 +289,62 @@ function attachInput(el) {
         sendControl({ t: "scroll", ...norm(el, e), dx: -e.deltaX / 100, dy: -e.deltaY / 100 });
     };
     el.oncontextmenu = (e) => e.preventDefault();
-
-    window.onkeydown = (e) => {
-        if (e.target.tagName === "INPUT") return;
-        if (e.key === "Backspace") sendControl({ t: "key", code: 67, a: "down" });
-        else if (e.key === "Enter") sendControl({ t: "key", code: 66, a: "down" });
-        else if (e.key.length === 1) sendControl({ t: "text", text: e.key });
-    };
-    window.onkeyup = (e) => {
-        if (e.target.tagName === "INPUT") return;
-        if (e.key === "Backspace") sendControl({ t: "key", code: 67, a: "up" });
-        else if (e.key === "Enter") sendControl({ t: "key", code: 66, a: "up" });
-    };
 }
 
+// physical keyboard passthrough (desktop); form fields keep their own keys
+const isFormField = (t) => ["INPUT", "SELECT", "TEXTAREA"].includes(t.tagName);
+window.onkeydown = (e) => {
+    if (isFormField(e.target) || !currentSerial) return;
+    if (e.key === "Backspace") sendControl({ t: "key", code: 67, a: "down" });
+    else if (e.key === "Enter") sendControl({ t: "key", code: 66, a: "down" });
+    else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) sendControl({ t: "text", text: e.key });
+};
+window.onkeyup = (e) => {
+    if (isFormField(e.target) || !currentSerial) return;
+    if (e.key === "Backspace") sendControl({ t: "key", code: 67, a: "up" });
+    else if (e.key === "Enter") sendControl({ t: "key", code: 66, a: "up" });
+};
+
+// on-screen keyboard bar (mobile: summons the local IME, forwards to device)
+function sendKbdText() {
+    const text = kbdInput.value;
+    if (text) {
+        sendControl({ t: "text", text });
+        kbdInput.value = "";
+    } else {
+        sendControl({ t: "key", code: 66, a: "down" });
+        sendControl({ t: "key", code: 66, a: "up" });
+    }
+}
+$("btn-kbd").onclick = () => {
+    kbdBar.hidden = !kbdBar.hidden;
+    if (!kbdBar.hidden) kbdInput.focus();
+};
+$("kbd-send").onclick = sendKbdText;
+kbdInput.onkeydown = (e) => {
+    if (e.key === "Enter") {
+        e.preventDefault();
+        sendKbdText();
+    } else if (e.key === "Backspace" && !kbdInput.value) {
+        sendControl({ t: "key", code: 67, a: "down" });
+        sendControl({ t: "key", code: 67, a: "up" });
+    }
+};
+
 for (const [id, code] of [["btn-back", 4], ["btn-home", 3], ["btn-recents", 187], ["btn-power", 26]]) {
-    document.getElementById(id).onclick = () => {
+    $(id).onclick = () => {
         sendControl({ t: "key", code, a: "down" });
         sendControl({ t: "key", code, a: "up" });
     };
 }
 
-document.getElementById("refresh").onclick = loadDevices;
+$("btn-fullscreen").onclick = () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen?.();
+};
+
+deviceSelect.onchange = () => {
+    if (deviceSelect.value) connect(deviceSelect.value);
+};
+$("refresh").onclick = loadDevices;
 loadDevices();
