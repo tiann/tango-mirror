@@ -28,8 +28,7 @@
         padding-top: max(8px, env(safe-area-inset-top));
         flex: none;
     }
-    #device-select {
-        flex: 1;
+    #device-select, #quality-select {
         min-width: 0;
         height: 40px;
         padding: 0 10px;
@@ -40,6 +39,8 @@
         font-size: 15px;
         appearance: none;
     }
+    #device-select { flex: 1; }
+    #quality-select { flex: none; }
     .iconbtn {
         flex: none;
         width: 40px;
@@ -178,6 +179,13 @@
 <body>
 <header id="topbar">
     <select id="device-select"></select>
+    <select id="quality-select" title="画质">
+        <option value="auto">自动</option>
+        <option value="low">流畅</option>
+        <option value="medium">平衡</option>
+        <option value="high">高清</option>
+    </select>
+    <button id="btn-mute" class="iconbtn" title="声音">🔇</button>
     <button id="refresh" class="iconbtn" title="刷新设备列表">⟳</button>
     <button id="btn-fullscreen" class="iconbtn" title="全屏">⛶</button>
 </header>

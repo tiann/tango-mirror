@@ -72,10 +72,30 @@ end-to-end-encrypted relay) practical: use the tunnel for the page and
 signaling, and let the video bytes flow browser⇆host directly.
 
 - Same H.264 stream, repacketized as RFC 6184 RTP (still no transcoding)
+- Opus audio (Android 11+) rides the same peer connection as a second
+  track — the browser `<video>` element plays it natively (P2P mode only;
+  toggle with the 🔇 button)
 - Touch/key input moves to a DataChannel; browser PLI feedback triggers
   scrcpy keyframe resets
 - If ICE fails or the connection drops, video falls back to the
-  WebSocket path automatically (status shows `[P2P]` / `[WS]`)
+  WebSocket path automatically (the status badge shows the active path)
+
+### Quality presets & congestion control
+
+The quality selector offers 流畅/平衡/高清 presets (800/1280/1920 max
+size). Changing presets restarts the scrcpy encoder in-session — the
+peer connection survives, so the picture just steps to the new quality.
+In auto mode (default) the server watches WebRTC REMB bandwidth
+estimates and downshifts one preset when the network can't keep up.
+The receiver also requests zero jitter-buffer delay
+(`playoutDelayHint`/`jitterBufferTarget`) for minimum glass-to-glass
+latency.
+
+### Clipboard sync
+
+Bidirectional: copying on the device pushes into the browser clipboard;
+focusing the tab pushes your local clipboard to the device (browser
+permission permitting).
 
 ## License
 

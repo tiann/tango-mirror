@@ -11,10 +11,13 @@ const ICE_SERVERS = [
 
 const $ = (id) => document.getElementById(id);
 const deviceSelect = $("device-select");
+const qualitySelect = $("quality-select");
 const stageEl = $("stage");
 const badgeEl = $("status-badge");
 const kbdBar = $("kbdbar");
 const kbdInput = $("kbd-input");
+
+const PRESET_NAMES = { low: "流畅", medium: "平衡", high: "高清" };
 
 let ws = null;
 let decoder = null;
@@ -28,6 +31,9 @@ let videoEl = null;
 let path = "ws"; // "ws" | "rtc"
 let statsTimer = null;
 let lastSize = "";
+let muted = true;
+let lastClipFromDevice = null;
+let lastClipToDevice = null;
 
 function setBadge(text, cls = "") {
     badgeEl.hidden = !text;
@@ -115,7 +121,14 @@ function connect(serial) {
             const msg = JSON.parse(ev.data);
             if (msg.type === "meta") {
                 startDecoder(msg.codec);
-                setBadge("WS");
+                if (msg.preset) qualitySelect.value = msg.auto ? "auto" : msg.preset;
+                if (path !== "rtc") setBadge("WS");
+            } else if (msg.type === "quality") {
+                // server auto-downshifted under congestion
+                setBadge(`网络受限，已降为${PRESET_NAMES[msg.preset] ?? msg.preset}`, "p2p");
+            } else if (msg.type === "clipboard") {
+                lastClipFromDevice = msg.text;
+                navigator.clipboard?.writeText(msg.text).catch(() => {});
             } else if (msg.type === "size") {
                 lastSize = `${msg.width}×${msg.height}`;
                 if (path !== "rtc") setBadge(`${lastSize} · WS`);
@@ -164,6 +177,9 @@ function startDecoder(codec) {
     canvas?.remove();
     canvas = renderer.canvas;
     canvas.className = "screen";
+    // a quality change restarts the stream mid-session; if P2P is already
+    // showing, the fresh canvas must stay hidden underneath
+    if (path === "rtc") canvas.style.display = "none";
     stageEl.appendChild(canvas);
     attachInput(canvas);
 }
@@ -187,16 +203,25 @@ async function acceptRtcOffer(sdp) {
         dc = e.channel;
     };
     pc.ontrack = (e) => {
-        videoEl = document.createElement("video");
-        videoEl.className = "screen-video";
-        videoEl.autoplay = true;
-        videoEl.muted = true;
-        videoEl.playsInline = true;
-        videoEl.srcObject = e.streams[0] ?? new MediaStream([e.track]);
-        stageEl.appendChild(videoEl);
+        // minimize receive-side latency where supported
+        try {
+            e.receiver.playoutDelayHint = 0;
+            e.receiver.jitterBufferTarget = 0;
+        } catch {}
+        // fires once per track (video + audio) — share one element/stream
+        if (!videoEl) {
+            videoEl = document.createElement("video");
+            videoEl.className = "screen-video";
+            videoEl.autoplay = true;
+            videoEl.muted = muted;
+            videoEl.playsInline = true;
+            videoEl.srcObject = new MediaStream();
+            stageEl.appendChild(videoEl);
+            attachInput(videoEl);
+            watchRtcStats();
+        }
+        videoEl.srcObject.addTrack(e.track);
         videoEl.play().catch((err) => console.warn("video.play() rejected:", err));
-        attachInput(videoEl);
-        watchRtcStats();
     };
     await pc.setRemoteDescription({ type: "offer", sdp });
     const answer = await pc.createAnswer();
@@ -346,5 +371,28 @@ $("btn-fullscreen").onclick = () => {
 deviceSelect.onchange = () => {
     if (deviceSelect.value) connect(deviceSelect.value);
 };
+qualitySelect.onchange = () => sendWs({ t: "quality", preset: qualitySelect.value });
+
+$("btn-mute").onclick = () => {
+    muted = !muted;
+    $("btn-mute").textContent = muted ? "🔇" : "🔊";
+    if (videoEl) {
+        videoEl.muted = muted;
+        videoEl.play?.().catch(() => {});
+    }
+};
+
+// clipboard sync: browser -> device on tab focus (permission permitting)
+window.addEventListener("focus", async () => {
+    if (!currentSerial || !navigator.clipboard?.readText) return;
+    try {
+        const text = await navigator.clipboard.readText();
+        if (text && text !== lastClipFromDevice && text !== lastClipToDevice) {
+            lastClipToDevice = text;
+            sendControl({ t: "clipboard", text });
+        }
+    } catch {} // permission denied — ignore silently
+});
+
 $("refresh").onclick = loadDevices;
 loadDevices();

@@ -11,7 +11,7 @@ import { Adb, AdbServerClient } from "@yume-chan/adb";
 import { AdbServerNodeTcpConnector } from "@yume-chan/adb-server-node-tcp";
 import { AdbScrcpyClient, AdbScrcpyOptions3_1 } from "@yume-chan/adb-scrcpy";
 import { ReadableStream } from "@yume-chan/stream-extra";
-import { ScrcpyPointerId, AndroidMotionEventAction } from "@yume-chan/scrcpy";
+import { ScrcpyPointerId, ScrcpyInstanceId, AndroidMotionEventAction } from "@yume-chan/scrcpy";
 import { createRtcSession } from "./webrtc.mjs";
 
 function argValue(...names) {
@@ -90,6 +90,13 @@ const ACTION_MAP = {
     up: AndroidMotionEventAction.Up,
 };
 
+const QUALITY_PRESETS = {
+    low: { maxSize: 800, videoBitRate: 1_000_000 },
+    medium: { maxSize: 1280, videoBitRate: 4_000_000 },
+    high: { maxSize: 1920, videoBitRate: 8_000_000 },
+};
+const PRESET_ORDER = ["low", "medium", "high"];
+
 wss.on("connection", async (ws, req) => {
     const serial = new URL(req.url, "http://localhost").searchParams.get("serial");
     const log = (...a) => console.log(`[${serial}]`, ...a);
@@ -99,12 +106,41 @@ wss.on("connection", async (ws, req) => {
     let video = null;
     let videoPath = "ws";
     let lastConfig = null;
+    let preset = "medium";
+    let autoQuality = true;
+    let restartWanted = false;
+    let clipSeq = 0n;
+    let clipboardFromDevice = null; // loop guards for bidirectional sync
+    let clipboardToDevice = null;
 
     const sendSignal = (obj) => {
         if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
     };
     const requestKeyframe = () => {
         controller?.resetVideo().catch(() => {});
+    };
+    const requestRestart = () => {
+        restartWanted = true;
+        scrcpy?.close().catch(() => {}); // ends the video read loop
+    };
+
+    // REMB-driven auto downshift: sustained low bandwidth estimate drops
+    // the encoder one preset (never below "low", 15s cooldown, auto mode only)
+    let rembLowCount = 0;
+    let rembCooldownUntil = 0;
+    const onBitrateEstimate = (bps) => {
+        if (!autoQuality || videoPath !== "rtc") return;
+        const target = QUALITY_PRESETS[preset].videoBitRate;
+        rembLowCount = bps < target * 0.6 ? rembLowCount + 1 : 0;
+        const idx = PRESET_ORDER.indexOf(preset);
+        if (rembLowCount >= 5 && idx > 0 && Date.now() > rembCooldownUntil) {
+            preset = PRESET_ORDER[idx - 1];
+            rembLowCount = 0;
+            rembCooldownUntil = Date.now() + 15_000;
+            log(`auto quality: estimate ${Math.round(bps / 1000)}kbps < ${preset} target, downshifting`);
+            sendSignal({ type: "quality", preset, auto: true });
+            requestRestart();
+        }
     };
 
     const handleControl = (msg) => {
@@ -140,6 +176,16 @@ wss.on("connection", async (ws, req) => {
                 });
             } else if (msg.t === "text") {
                 await controller.injectText(msg.text);
+            } else if (msg.t === "clipboard") {
+                if (msg.text && msg.text !== clipboardFromDevice) {
+                    clipboardToDevice = msg.text;
+                    clipSeq += 1n;
+                    await controller.setClipboard({
+                        sequence: clipSeq,
+                        paste: false,
+                        content: msg.text,
+                    });
+                }
             }
         })().catch((e) => log("control error:", e.message));
     };
@@ -157,8 +203,20 @@ wss.on("connection", async (ws, req) => {
             rtc?.close();
             rtc = createRtcSession({ sendSignal, onControl: handleControl, log });
             rtc.onKeyframeRequest = requestKeyframe;
+            rtc.onBitrateEstimate = onBitrateEstimate;
             if (lastConfig) rtc.sendVideoPacket(lastConfig);
             rtc.start().catch((e) => log("webrtc offer error:", e.message));
+        } else if (msg.t === "quality") {
+            if (msg.preset === "auto") {
+                autoQuality = true;
+            } else if (QUALITY_PRESETS[msg.preset]) {
+                autoQuality = false;
+                if (msg.preset !== preset) {
+                    preset = msg.preset;
+                    log(`quality preset -> ${preset}`);
+                    requestRestart();
+                }
+            }
         } else if (msg.t === "rtc-answer") {
             rtc?.handleAnswer(msg.sdp).catch((e) => log("webrtc answer error:", e.message));
         } else if (msg.t === "rtc-ice") {
@@ -176,7 +234,9 @@ wss.on("connection", async (ws, req) => {
         const transport = await adbClient.createTransport({ serial });
         const adb = new Adb(transport);
 
-        await AdbScrcpyClient.pushServer(
+        // the scrcpy server unlinks its own jar right after startup, so the
+        // binary must be pushed again before every start
+        const pushServer = () => AdbScrcpyClient.pushServer(
             adb,
             new ReadableStream({
                 start(c) {
@@ -187,60 +247,116 @@ wss.on("connection", async (ws, req) => {
             SERVER_PATH,
         );
 
-        const options = new AdbScrcpyOptions3_1({
-            audio: false,
-            maxSize: 1280,
-            videoBitRate: 4_000_000,
-            clipboardAutosync: false,
-        });
-        scrcpy = await AdbScrcpyClient.start(adb, SERVER_PATH, options);
-        scrcpy.output.pipeTo(new WritableStreamStd((line) => log("server:", line))).catch(() => {});
-
-        video = await scrcpy.videoStream;
-        controller = scrcpy.controller;
-        log(`stream started codec=${video.metadata.codec} ${video.width}x${video.height}`);
-        ws.send(JSON.stringify({
-            type: "meta",
-            codec: video.metadata.codec,
-            width: video.width,
-            height: video.height,
-            serverVersion: VERSION,
-        }));
-        video.sizeChanged((size) => {
-            if (ws.readyState === ws.OPEN) {
-                ws.send(JSON.stringify({ type: "size", ...size }));
-            }
-        });
-
-        const reader = video.stream.getReader();
         const HEADER = 10;
-        while (true) {
-            const { done, value: packet } = await reader.read();
-            if (done || ws.readyState !== ws.OPEN) break;
-            if (packet.type === "configuration") lastConfig = packet;
-            if (rtc) {
+        // stream loop: each iteration is one scrcpy server run; quality
+        // changes close the current run and start a new one in-session
+        while (ws.readyState === ws.OPEN) {
+            restartWanted = false;
+            // random scid -> unique abstract socket name, so a restart can't
+            // collide with the previous server instance still shutting down
+            const makeOptions = () => new AdbScrcpyOptions3_1({
+                scid: ScrcpyInstanceId.random(),
+                audio: true,
+                audioCodec: "opus",
+                clipboardAutosync: true,
+                ...QUALITY_PRESETS[preset],
+            });
+            scrcpy = null;
+            for (let attempt = 0; ; attempt++) {
                 try {
-                    if (packet.type === "configuration" || rtc.connected) {
-                        rtc.sendVideoPacket(packet);
-                    }
+                    await pushServer();
+                    scrcpy = await AdbScrcpyClient.start(adb, SERVER_PATH, makeOptions());
+                    break;
                 } catch (e) {
-                    log("webrtc send error:", e.message);
+                    if (attempt >= 2) throw e;
+                    log(`scrcpy start failed (${e.message}), retrying...`);
+                    await new Promise((r) => setTimeout(r, 700));
                 }
             }
-            if (videoPath === "rtc" && packet.type !== "configuration") continue;
-            const buf = new Uint8Array(HEADER + packet.data.length);
-            const dv = new DataView(buf.buffer);
-            if (packet.type === "configuration") {
-                buf[0] = 0;
-            } else {
-                buf[0] = 1;
-                buf[1] = packet.keyframe ? 1 : 0;
-                dv.setBigUint64(2, packet.pts ?? 0n);
+            const current = scrcpy;
+            current.output.pipeTo(new WritableStreamStd((line) => log("server:", line))).catch(() => {});
+
+            video = await current.videoStream;
+            controller = current.controller;
+            log(`stream started codec=${video.metadata.codec} preset=${preset}`);
+            sendSignal({
+                type: "meta",
+                codec: video.metadata.codec,
+                width: video.width,
+                height: video.height,
+                serverVersion: VERSION,
+                preset,
+                auto: autoQuality,
+            });
+            video.sizeChanged((size) => sendSignal({ type: "size", ...size }));
+
+            // audio pump: opus packets go P2P only (native <video> plays them)
+            (async () => {
+                const meta = await current.audioStream;
+                if (meta?.type !== "success") {
+                    if (meta) log(`audio unavailable: ${meta.type}`);
+                    return;
+                }
+                const audioReader = meta.stream.getReader();
+                while (true) {
+                    const { done, value: packet } = await audioReader.read();
+                    if (done) break;
+                    if (rtc?.connected) {
+                        try {
+                            rtc.sendAudioPacket(packet);
+                        } catch {}
+                    }
+                }
+            })().catch((e) => log("audio pump error:", e.message));
+
+            // clipboard pump: device -> browser
+            (async () => {
+                if (!current.clipboard) return;
+                const clipReader = current.clipboard.getReader();
+                while (true) {
+                    const { done, value: text } = await clipReader.read();
+                    if (done) break;
+                    if (text && text !== clipboardToDevice) {
+                        clipboardFromDevice = text;
+                        sendSignal({ type: "clipboard", text });
+                    }
+                }
+            })().catch((e) => log("clipboard pump error:", e.message));
+
+            const reader = video.stream.getReader();
+            while (true) {
+                const { done, value: packet } = await reader.read();
+                if (done || ws.readyState !== ws.OPEN) break;
+                if (packet.type === "configuration") lastConfig = packet;
+                if (rtc) {
+                    try {
+                        if (packet.type === "configuration" || rtc.connected) {
+                            rtc.sendVideoPacket(packet);
+                        }
+                    } catch (e) {
+                        log("webrtc send error:", e.message);
+                    }
+                }
+                if (videoPath === "rtc" && packet.type !== "configuration") continue;
+                const buf = new Uint8Array(HEADER + packet.data.length);
+                const dv = new DataView(buf.buffer);
+                if (packet.type === "configuration") {
+                    buf[0] = 0;
+                } else {
+                    buf[0] = 1;
+                    buf[1] = packet.keyframe ? 1 : 0;
+                    dv.setBigUint64(2, packet.pts ?? 0n);
+                }
+                buf.set(packet.data, HEADER);
+                ws.send(buf);
             }
-            buf.set(packet.data, HEADER);
-            ws.send(buf);
+            reader.releaseLock();
+            try {
+                await current.close();
+            } catch {}
+            if (!restartWanted) break;
+            log(`restarting stream (preset=${preset})`);
         }
-        reader.releaseLock();
     } catch (e) {
         log("session error:", e);
         if (ws.readyState === ws.OPEN) {

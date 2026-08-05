@@ -1,39 +1,45 @@
 import {
     MediaStreamTrack,
+    PictureLossIndication,
     RTCPeerConnection,
     RTCRtpCodecParameters,
+    ReceiverEstimatedMaxBitrate,
     RtpHeader,
     RtpPacket,
 } from "werift";
 
 const RTP_MTU = 1200;
-const PAYLOAD_TYPE = 96;
+const VIDEO_PT = 96;
+const AUDIO_PT = 111;
 
 const DEFAULT_ICE_SERVERS = [
     { urls: "stun:stun.cloudflare.com:3478" },
     { urls: "stun:stun.l.google.com:19302" },
 ];
 
+class RtpStreamState {
+    seq = Math.floor(Math.random() * 0xffff);
+    ssrc = Math.floor(Math.random() * 0xffffffff);
+
+    packet(payloadType, payload, timestamp, marker) {
+        const header = new RtpHeader({
+            payloadType,
+            sequenceNumber: this.seq,
+            timestamp,
+            ssrc: this.ssrc,
+            marker,
+        });
+        this.seq = (this.seq + 1) & 0xffff;
+        return new RtpPacket(header, Buffer.from(payload));
+    }
+}
+
 // RFC 6184 packetizer: Annex B access units -> single-NAL / FU-A RTP packets
-class H264Packetizer {
-    #seq = Math.floor(Math.random() * 0xffff);
-    #ssrc = Math.floor(Math.random() * 0xffffffff);
+class H264Packetizer extends RtpStreamState {
     #configNalus = [];
 
     setConfig(data) {
         this.#configNalus = splitAnnexB(data);
-    }
-
-    #packet(payload, timestamp, marker) {
-        const header = new RtpHeader({
-            payloadType: PAYLOAD_TYPE,
-            sequenceNumber: this.#seq,
-            timestamp,
-            ssrc: this.#ssrc,
-            marker,
-        });
-        this.#seq = (this.#seq + 1) & 0xffff;
-        return new RtpPacket(header, Buffer.from(payload));
     }
 
     packetize(data, timestamp, keyframe) {
@@ -47,7 +53,7 @@ class H264Packetizer {
             const nalu = nalus[i];
             const last = i === nalus.length - 1;
             if (nalu.length <= RTP_MTU) {
-                packets.push(this.#packet(nalu, timestamp, last));
+                packets.push(this.packet(VIDEO_PT, nalu, timestamp, last));
                 continue;
             }
             // FU-A fragmentation
@@ -63,7 +69,7 @@ class H264Packetizer {
                     Buffer.from([indicator, fuHeader]),
                     nalu.subarray(offset, end),
                 ]);
-                packets.push(this.#packet(payload, timestamp, last && fin));
+                packets.push(this.packet(VIDEO_PT, payload, timestamp, last && fin));
                 offset = end;
             }
         }
@@ -96,7 +102,7 @@ export function createRtcSession({ sendSignal, onControl, log }) {
                 new RTCRtpCodecParameters({
                     mimeType: "video/H264",
                     clockRate: 90000,
-                    payloadType: PAYLOAD_TYPE,
+                    payloadType: VIDEO_PT,
                     rtcpFeedback: [
                         { type: "nack" },
                         { type: "nack", parameter: "pli" },
@@ -106,12 +112,22 @@ export function createRtcSession({ sendSignal, onControl, log }) {
                         "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
                 }),
             ],
+            audio: [
+                new RTCRtpCodecParameters({
+                    mimeType: "audio/opus",
+                    clockRate: 48000,
+                    channels: 2,
+                    payloadType: AUDIO_PT,
+                }),
+            ],
         },
         iceServers: DEFAULT_ICE_SERVERS,
     });
 
-    const track = new MediaStreamTrack({ kind: "video" });
-    pc.addTransceiver(track, { direction: "sendonly" });
+    const videoTrack = new MediaStreamTrack({ kind: "video" });
+    pc.addTransceiver(videoTrack, { direction: "sendonly" });
+    const audioTrack = new MediaStreamTrack({ kind: "audio" });
+    pc.addTransceiver(audioTrack, { direction: "sendonly" });
 
     const channel = pc.createDataChannel("control", { ordered: true });
     channel.onMessage.subscribe((msg) => {
@@ -120,11 +136,15 @@ export function createRtcSession({ sendSignal, onControl, log }) {
         } catch {}
     });
 
-    // browser PLI (e.g. after packet loss) -> ask scrcpy for a fresh keyframe
     let lastPli = 0;
     let onKeyframeRequest;
-    track.onReceiveRtcp.subscribe((rtcp) => {
-        if (rtcp.type === 206 || rtcp.type === 205) {
+    let onBitrateEstimate;
+    videoTrack.onReceiveRtcp.subscribe((rtcp) => {
+        const feedback = rtcp.feedback;
+        if (feedback instanceof ReceiverEstimatedMaxBitrate) {
+            onBitrateEstimate?.(Number(feedback.bitrate));
+        } else if (feedback instanceof PictureLossIndication || rtcp.type === 205) {
+            // PLI (or transport NACK burst) -> ask scrcpy for a fresh keyframe
             const now = Date.now();
             if (now - lastPli > 1000) {
                 lastPli = now;
@@ -148,7 +168,8 @@ export function createRtcSession({ sendSignal, onControl, log }) {
         if (connected && !wasConnected) onKeyframeRequest?.();
     });
 
-    const packetizer = new H264Packetizer();
+    const videoPacketizer = new H264Packetizer();
+    const audioStream = new RtpStreamState();
 
     return {
         get connected() {
@@ -156,6 +177,9 @@ export function createRtcSession({ sendSignal, onControl, log }) {
         },
         set onKeyframeRequest(fn) {
             onKeyframeRequest = fn;
+        },
+        set onBitrateEstimate(fn) {
+            onBitrateEstimate = fn;
         },
         async start() {
             const offer = await pc.createOffer();
@@ -170,14 +194,20 @@ export function createRtcSession({ sendSignal, onControl, log }) {
         },
         sendVideoPacket(packet) {
             if (packet.type === "configuration") {
-                packetizer.setConfig(packet.data);
+                videoPacketizer.setConfig(packet.data);
                 return;
             }
             // scrcpy pts is in microseconds; RTP video clock is 90 kHz
             const ts = Number(((packet.pts ?? 0n) * 9n / 100n) & 0xffffffffn);
-            for (const rtp of packetizer.packetize(packet.data, ts, packet.keyframe)) {
-                track.writeRtp(rtp);
+            for (const rtp of videoPacketizer.packetize(packet.data, ts, packet.keyframe)) {
+                videoTrack.writeRtp(rtp);
             }
+        },
+        sendAudioPacket(packet) {
+            if (packet.type === "configuration") return; // opus id header, not RTP payload
+            // one opus frame per RTP packet; 48 kHz clock from microsecond pts
+            const ts = Number(((packet.pts ?? 0n) * 48n / 1000n) & 0xffffffffn);
+            audioTrack.writeRtp(audioStream.packet(AUDIO_PT, packet.data, ts, false));
         },
         close() {
             pc.close().catch(() => {});
