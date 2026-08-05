@@ -1,0 +1,47 @@
+{
+  "name": "tango-mirror",
+  "version": "0.1.0",
+  "description": "View and control WiFi-connected Android devices from a browser. Minimal self-hosted scrcpy-over-WebSocket server built on ya-webadb (Tango), scrcpy server v3.1.",
+  "type": "module",
+  "bin": {
+    "tango-mirror": "server.mjs"
+  },
+  "files": [
+    "server.mjs",
+    "public/",
+    "server.bin",
+    "scrcpy-server.LICENSE"
+  ],
+  "scripts": {
+    "build": "esbuild src/client.js --bundle --format=iife --outfile=public/app.js --minify",
+    "fetch-server": "fetch-scrcpy-server 3.1",
+    "prepack": "npm run build && cp node_modules/@yume-chan/fetch-scrcpy-server/server.bin server.bin && cp node_modules/@yume-chan/fetch-scrcpy-server/scrcpy.LICENSE scrcpy-server.LICENSE",
+    "start": "node server.mjs"
+  },
+  "keywords": [
+    "scrcpy",
+    "android",
+    "screen-mirroring",
+    "adb",
+    "ya-webadb",
+    "tango",
+    "webcodecs"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@yume-chan/adb": "^2.6.2",
+    "@yume-chan/adb-scrcpy": "^2.3.2",
+    "@yume-chan/adb-server-node-tcp": "^2.5.2",
+    "@yume-chan/fetch-scrcpy-server": "^1.0.0",
+    "@yume-chan/scrcpy": "^2.3.0",
+    "@yume-chan/stream-extra": "^2.6.1",
+    "ws": "^8.21.2"
+  },
+  "devDependencies": {
+    "@yume-chan/scrcpy-decoder-webcodecs": "^2.5.3",
+    "esbuild": "^0.28.1"
+  }
+}
