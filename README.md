@@ -45,6 +45,8 @@ override with `?lang=en` / `?lang=zh` (remembered afterwards).
 | `--port`, `-p` | `PORT` | `8010` | HTTP/WebSocket listen port |
 | `--adb-host` | `ADB_HOST` | `127.0.0.1` | adb server host |
 | `--adb-port` | `ADB_PORT` | `5037` | adb server port |
+| `--token` | `TANGO_TOKEN` | off | require this token on every API/WebSocket call |
+| `--shell` | — | off | enable the device shell (forces a token; one is generated if absent) |
 | `--tunnel [backend]` | — | off | expose publicly; backend `tunwg`, `cloudflared`, or auto |
 | `--tunnel-api` | `TUNWG_API` | `l.tunwg.com` | tunwg relay server |
 | `--tunnel-auth` | — | off | basic auth `user:pass` (tunwg only) |
@@ -93,6 +95,21 @@ estimates and downshifts one preset when the network can't keep up.
 The receiver also requests zero jitter-buffer delay
 (`playoutDelayHint`/`jitterBufferTarget`) for minimum glass-to-glass
 latency.
+
+### Device shell
+
+`--shell` adds an interactive terminal (`>_` in the bottom bar) running
+a real PTY on the device via the ADB shell protocol — `top`, `vi` and
+Ctrl-C all work, and the terminal size is synced. It rides a dedicated
+WebRTC DataChannel so output bursts (`logcat`) can't delay touch input,
+falling back to the WebSocket when P2P is unavailable.
+
+Because a shell is full control of the device, `--shell` refuses to run
+unauthenticated: pass `--token`, or one is generated and printed at
+startup. Open the page with `?token=…` once (it is saved and scrubbed
+from the URL). The token travels in a WebSocket subprotocol and an
+`Authorization` header, never in a URL; with tunwg the relay cannot see
+it, since the tunnel is end-to-end encrypted.
 
 ### Clipboard sync
 

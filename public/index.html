@@ -122,6 +122,34 @@
         touch-action: none;
     }
 
+    /* ── shell panel (overlays the lower stage) ── */
+    #shell-panel {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 60%;
+        z-index: 6;
+        display: flex;
+        flex-direction: column;
+        background: #0f1115;
+        border-top: 1px solid #2a2f3a;
+        box-shadow: 0 -8px 24px rgba(0, 0, 0, .5);
+    }
+    #shell-panel[hidden] { display: none; }
+    #shell-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px 6px 12px;
+        border-bottom: 1px solid #2a2f3a;
+        font-size: 13px;
+        color: #aab2c0;
+    }
+    #shell-title { flex: 1; }
+    #shell-head .iconbtn { width: 32px; height: 32px; font-size: 14px; }
+    #terminal { flex: 1; min-height: 0; padding: 4px 0 4px 8px; }
+
     /* ── keyboard input bar ────────────────────── */
     #kbdbar {
         display: flex;
@@ -193,6 +221,13 @@
 <div id="stage-wrap">
     <div id="stage"></div>
     <span id="status-badge" hidden></span>
+    <section id="shell-panel" hidden>
+        <div id="shell-head">
+            <span id="shell-title">shell</span>
+            <button id="shell-close" class="iconbtn">✕</button>
+        </div>
+        <div id="terminal"></div>
+    </section>
 </div>
 <div id="kbdbar" hidden>
     <input id="kbd-input" placeholder="输入文字，回车发送到设备" autocomplete="off" autocapitalize="off">
@@ -204,6 +239,7 @@
     <button id="btn-home" title="主页">◯</button>
     <button id="btn-recents" title="最近任务">▢</button>
     <button id="btn-kbd" class="accent" title="键盘">⌨</button>
+    <button id="btn-shell" class="accent" title="Shell">&gt;_</button>
 </nav>
 <script src="./app.js"></script>
 </body>

@@ -95,7 +95,7 @@ function splitAnnexB(data) {
     return nalus;
 }
 
-export function createRtcSession({ sendSignal, onControl, log }) {
+export function createRtcSession({ sendSignal, onControl, onShell, log }) {
     const pc = new RTCPeerConnection({
         codecs: {
             video: [
@@ -133,6 +133,14 @@ export function createRtcSession({ sendSignal, onControl, log }) {
     channel.onMessage.subscribe((msg) => {
         try {
             onControl(JSON.parse(String(msg)));
+        } catch {}
+    });
+
+    // separate channel: shell output bursts must not delay input events
+    const shellChannel = pc.createDataChannel("shell", { ordered: true });
+    shellChannel.onMessage.subscribe((msg) => {
+        try {
+            onShell?.(JSON.parse(String(msg)));
         } catch {}
     });
 
@@ -202,6 +210,12 @@ export function createRtcSession({ sendSignal, onControl, log }) {
             for (const rtp of videoPacketizer.packetize(packet.data, ts, packet.keyframe)) {
                 videoTrack.writeRtp(rtp);
             }
+        },
+        // returns false when the channel isn't up, so callers can fall back
+        sendShell(obj) {
+            if (shellChannel.readyState !== "open") return false;
+            shellChannel.send(JSON.stringify(obj));
+            return true;
         },
         sendAudioPacket(packet) {
             if (packet.type === "configuration") return; // opus id header, not RTP payload

@@ -3,6 +3,11 @@ import {
     WebGLVideoFrameRenderer,
     BitmapVideoFrameRenderer,
 } from "@yume-chan/scrcpy-decoder-webcodecs";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import xtermCss from "@xterm/xterm/css/xterm.css";
+
+document.head.appendChild(document.createElement("style")).textContent = xtermCss;
 
 const ICE_SERVERS = [
     { urls: "stun:stun.cloudflare.com:3478" },
@@ -43,6 +48,11 @@ const STRINGS = {
         disconnected: "连接已断开",
         downshift: (p) => `网络受限，已降为${p}`,
         backendPrompt: "后端地址（tango-mirror 服务的域名，如 xxx.relay.hapi.run）：",
+        shell: "设备 Shell",
+        close: "关闭",
+        shellExited: (c) => `会话结束，退出码 ${c}`,
+        unauthorized: "认证失败",
+        unauthorizedHint: "token 无效或缺失 — 用启动日志里的 ?token=… 链接打开",
     },
     en: {
         refresh: "Refresh devices",
@@ -77,6 +87,11 @@ const STRINGS = {
         disconnected: "Disconnected",
         downshift: (p) => `Network limited, switched to ${p}`,
         backendPrompt: "Backend address (your tango-mirror server's domain, e.g. xxx.relay.hapi.run):",
+        shell: "Device shell",
+        close: "Close",
+        shellExited: (c) => `session ended, exit code ${c}`,
+        unauthorized: "Unauthorized",
+        unauthorizedHint: "Missing or invalid token — open the ?token=… link from the server log",
     },
 };
 
@@ -95,6 +110,17 @@ const backendParam = new URLSearchParams(location.search).get("server");
 if (backendParam !== null) {
     localStorage.setItem("tango-backend", backendParam.replace(/^[a-z]+:\/\//, "").replace(/\/$/, ""));
 }
+// token arrives via ?token=, then is scrubbed from the URL so it doesn't
+// linger in history or get shared along with the link
+const tokenParam = new URLSearchParams(location.search).get("token");
+if (tokenParam !== null) {
+    localStorage.setItem("tango-token", tokenParam);
+    const clean = new URL(location.href);
+    clean.searchParams.delete("token");
+    history.replaceState(null, "", clean);
+}
+const TOKEN = localStorage.getItem("tango-token") || "";
+
 const BACKEND = localStorage.getItem("tango-backend") || "";
 const HTTP_BASE = BACKEND ? `https://${BACKEND}` : "";
 const WS_BASE = BACKEND
@@ -115,6 +141,7 @@ const stageEl = $("stage");
 const badgeEl = $("status-badge");
 const kbdBar = $("kbdbar");
 const kbdInput = $("kbd-input");
+const shellPanel = $("shell-panel");
 
 const PRESET_NAMES = { low: t.qLow, medium: t.qMedium, high: t.qHigh };
 
@@ -124,6 +151,7 @@ for (const [id, key] of [
     ["refresh", "refresh"], ["btn-fullscreen", "fullscreen"], ["btn-settings", "settings"],
     ["quality-select", "quality"], ["btn-mute", "sound"], ["btn-power", "power"],
     ["btn-back", "back"], ["btn-home", "home"], ["btn-recents", "recents"], ["btn-kbd", "keyboard"],
+    ["btn-shell", "shell"], ["shell-close", "close"],
 ]) $(id).title = t[key];
 for (const opt of qualitySelect.options) {
     opt.textContent = { auto: t.qAuto, low: t.qLow, medium: t.qMedium, high: t.qHigh }[opt.value];
@@ -140,6 +168,7 @@ let currentSerial = null;
 
 let pc = null;
 let dc = null;
+let shellDc = null;
 let videoEl = null;
 let path = "ws"; // "ws" | "rtc"
 let statsTimer = null;
@@ -165,7 +194,14 @@ async function loadDevices() {
     placeholder(t.loadingDevices);
     let devices = [];
     try {
-        const res = await fetch(`${HTTP_BASE}/api/devices`);
+        const res = await fetch(`${HTTP_BASE}/api/devices`, {
+            headers: TOKEN ? { authorization: `Bearer ${TOKEN}` } : {},
+        });
+        if (res.status === 401) {
+            placeholder(t.unauthorized);
+            setBadge(t.unauthorizedHint, "error");
+            return;
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         devices = await res.json();
     } catch {
@@ -216,6 +252,7 @@ function teardownRtc() {
     clearInterval(statsTimer);
     statsTimer = null;
     dc = null;
+    shellDc = null;
     pc?.close();
     pc = null;
     videoEl?.remove();
@@ -247,7 +284,8 @@ function connect(serial) {
     disconnect();
     currentSerial = serial;
     setBadge(t.connecting);
-    ws = new WebSocket(`${WS_BASE}/api/stream?serial=${encodeURIComponent(serial)}`);
+    const url = `${WS_BASE}/api/stream?serial=${encodeURIComponent(serial)}`;
+    ws = TOKEN ? new WebSocket(url, [`tango.token.${TOKEN}`]) : new WebSocket(url);
     ws.binaryType = "arraybuffer";
     // negotiate WebRTC immediately, in parallel with scrcpy startup
     ws.onopen = () => tryWebRtc();
@@ -277,6 +315,8 @@ function connect(serial) {
                 });
             } else if (msg.t === "rtc-ice") {
                 pc?.addIceCandidate(msg.candidate).catch(() => {});
+            } else if (msg.t?.startsWith("shell-")) {
+                handleShellMessage(msg);
             }
             return;
         }
@@ -293,8 +333,9 @@ function connect(serial) {
             setBadge(t.decodeError(e.message), "error");
         }
     };
-    ws.onclose = () => {
-        if (currentSerial === serial) setBadge(t.disconnected, "error");
+    ws.onclose = (e) => {
+        if (currentSerial !== serial) return;
+        setBadge(e.code === 4001 ? t.unauthorizedHint : t.disconnected, "error");
     };
 }
 
@@ -336,7 +377,12 @@ async function acceptRtcOffer(sdp) {
         }
     };
     pc.ondatachannel = (e) => {
-        dc = e.channel;
+        if (e.channel.label === "shell") {
+            shellDc = e.channel;
+            shellDc.onmessage = (m) => handleShellMessage(JSON.parse(m.data));
+        } else {
+            dc = e.channel;
+        }
     };
     pc.ontrack = (e) => {
         // minimize receive-side latency where supported
@@ -452,6 +498,59 @@ function attachInput(el) {
     el.oncontextmenu = (e) => e.preventDefault();
 }
 
+// ── device shell ───────────────────────────────────────────────
+let term = null;
+let fitAddon = null;
+let shellReady = false;
+
+function sendShell(obj) {
+    // mirrors sendControl: prefer the dedicated P2P channel
+    if (shellDc?.readyState === "open") shellDc.send(JSON.stringify(obj));
+    else sendWs(obj);
+}
+
+function openShell() {
+    if (!currentSerial) return;
+    shellPanel.hidden = false;
+    if (!term) {
+        term = new Terminal({
+            fontSize: 13,
+            cursorBlink: true,
+            theme: { background: "#0f1115", foreground: "#e6e8ec" },
+        });
+        fitAddon = new FitAddon();
+        term.loadAddon(fitAddon);
+        term.open($("terminal"));
+        term.onData((d) => sendShell({ t: "shell-in", d }));
+        term.onResize(({ rows, cols }) => sendShell({ t: "shell-resize", rows, cols }));
+        new ResizeObserver(() => fitAddon?.fit()).observe($("terminal"));
+    }
+    fitAddon.fit();
+    term.focus();
+    if (!shellReady) {
+        sendShell({ t: "shell-start", rows: term.rows, cols: term.cols });
+    }
+}
+
+function closeShell() {
+    shellPanel.hidden = true;
+    videoEl?.focus?.();
+}
+
+function handleShellMessage(msg) {
+    if (msg.t === "shell-ready") {
+        shellReady = true;
+    } else if (msg.t === "shell-out") {
+        term?.write(Uint8Array.from(atob(msg.d), (c) => c.charCodeAt(0)));
+    } else if (msg.t === "shell-exit") {
+        shellReady = false;
+        term?.write(`\r\n\x1b[90m[${t.shellExited(msg.code)}]\x1b[0m\r\n`);
+    } else if (msg.t === "shell-error") {
+        shellReady = false;
+        term?.write(`\r\n\x1b[31m${msg.message}\x1b[0m\r\n`);
+    }
+}
+
 // physical keyboard passthrough (desktop); form fields keep their own keys
 const isFormField = (t) => ["INPUT", "SELECT", "TEXTAREA"].includes(t.tagName);
 window.onkeydown = (e) => {
@@ -505,6 +604,8 @@ $("btn-fullscreen").onclick = () => {
 };
 
 $("btn-settings").onclick = promptBackend;
+$("btn-shell").onclick = () => (shellPanel.hidden ? openShell() : closeShell());
+$("shell-close").onclick = closeShell;
 
 deviceSelect.onchange = () => {
     if (deviceSelect.value) connect(deviceSelect.value);

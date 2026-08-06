@@ -13,7 +13,7 @@
     "scrcpy-server.LICENSE"
   ],
   "scripts": {
-    "build": "esbuild src/client.js --bundle --format=iife --outfile=public/app.js --minify",
+    "build": "esbuild src/client.js --bundle --format=iife --outfile=public/app.js --minify --loader:.css=text",
     "fetch-server": "fetch-scrcpy-server 3.1",
     "prepack": "npm run build && cp node_modules/@yume-chan/fetch-scrcpy-server/server.bin server.bin && cp node_modules/@yume-chan/fetch-scrcpy-server/scrcpy.LICENSE scrcpy-server.LICENSE",
     "start": "node server.mjs"
@@ -32,6 +32,8 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "@yume-chan/adb": "^2.6.2",
     "@yume-chan/adb-scrcpy": "^2.3.2",
     "@yume-chan/adb-server-node-tcp": "^2.5.2",

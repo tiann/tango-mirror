@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -30,6 +31,23 @@ const SERVER_PATH = "/data/local/tmp/tango-scrcpy-server.jar";
 const PKG_DIR = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(PKG_DIR, "public");
 
+const SHELL_ENABLED = process.argv.includes("--shell");
+let TOKEN = argValue("--token") ?? process.env.TANGO_TOKEN ?? "";
+if (SHELL_ENABLED && !TOKEN) {
+    // never expose a shell without auth — generate one rather than fail open
+    TOKEN = randomBytes(16).toString("hex");
+}
+
+const TOKEN_PROTOCOL = "tango.token.";
+
+function tokenValid(given) {
+    if (!TOKEN) return true;
+    if (typeof given !== "string") return false;
+    const a = Buffer.from(given);
+    const b = Buffer.from(TOKEN);
+    return a.length === b.length && timingSafeEqual(a, b);
+}
+
 const adbClient = new AdbServerClient(
     new AdbServerNodeTcpConnector({ host: ADB_HOST, port: ADB_PORT }),
 );
@@ -55,9 +73,26 @@ const MIME = {
 
 const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
-    if (url.pathname === "/api/devices") {
+    if (url.pathname.startsWith("/api/")) {
         // page may be served from static hosting (e.g. GitHub Pages)
         res.setHeader("access-control-allow-origin", "*");
+        res.setHeader("access-control-allow-headers", "authorization");
+        if (req.method === "OPTIONS") {
+            res.writeHead(204);
+            res.end();
+            return;
+        }
+        const header = req.headers.authorization;
+        const given = header?.startsWith("Bearer ")
+            ? header.slice(7)
+            : url.searchParams.get("token") ?? undefined;
+        if (!tokenValid(given)) {
+            res.writeHead(401, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: "unauthorized" }));
+            return;
+        }
+    }
+    if (url.pathname === "/api/devices") {
         try {
             const devices = await adbClient.getDevices();
             res.writeHead(200, { "content-type": "application/json" });
@@ -84,7 +119,19 @@ const httpServer = createServer(async (req, res) => {
     }
 });
 
-const wss = new WebSocketServer({ server: httpServer, path: "/api/stream" });
+const wss = new WebSocketServer({
+    server: httpServer,
+    path: "/api/stream",
+    // browsers can't set headers on WebSocket, so the token rides a
+    // subprotocol (kept out of URLs and access logs); echo it back or the
+    // browser fails the handshake
+    handleProtocols: (protocols) => {
+        for (const p of protocols) {
+            if (p.startsWith(TOKEN_PROTOCOL)) return p;
+        }
+        return false;
+    },
+});
 
 const ACTION_MAP = {
     down: AndroidMotionEventAction.Down,
@@ -100,8 +147,22 @@ const QUALITY_PRESETS = {
 const PRESET_ORDER = ["low", "medium", "high"];
 
 wss.on("connection", async (ws, req) => {
-    const serial = new URL(req.url, "http://localhost").searchParams.get("serial");
+    const reqUrl = new URL(req.url, "http://localhost");
+    const serial = reqUrl.searchParams.get("serial");
     const log = (...a) => console.log(`[${serial}]`, ...a);
+
+    const offered = (req.headers["sec-websocket-protocol"] ?? "")
+        .split(",")
+        .map((p) => p.trim())
+        .find((p) => p.startsWith(TOKEN_PROTOCOL));
+    const given = offered
+        ? offered.slice(TOKEN_PROTOCOL.length)
+        : reqUrl.searchParams.get("token") ?? undefined;
+    if (!tokenValid(given)) {
+        log("rejected: bad token");
+        ws.close(4001, "unauthorized");
+        return;
+    }
     let scrcpy;
     let rtc = null;
     let controller = null;
@@ -114,9 +175,64 @@ wss.on("connection", async (ws, req) => {
     let clipSeq = 0n;
     let clipboardFromDevice = null; // loop guards for bidirectional sync
     let clipboardToDevice = null;
+    let adb = null;
+    let pty = null;
+    let ptyWriter = null;
 
     const sendSignal = (obj) => {
         if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
+    };
+    // shell traffic prefers its own DataChannel so an output burst
+    // (logcat, cat) can't head-of-line block touch events
+    const sendShell = (obj) => {
+        if (!rtc?.sendShell(obj)) sendSignal(obj);
+    };
+
+    const closePty = () => {
+        try {
+            ptyWriter?.releaseLock();
+        } catch {}
+        ptyWriter = null;
+        pty?.kill();
+        pty = null;
+    };
+
+    const handleShell = async (msg) => {
+        if (msg.t === "shell-start") {
+            if (!SHELL_ENABLED) {
+                sendShell({ t: "shell-error", message: "shell disabled (start server with --shell)" });
+                return;
+            }
+            closePty();
+            const service = adb?.subprocess.shellProtocol;
+            if (!service?.isSupported) {
+                sendShell({ t: "shell-error", message: "device does not support the shell protocol" });
+                return;
+            }
+            pty = await service.pty({ terminalType: "xterm-256color" });
+            ptyWriter = pty.input.getWriter();
+            const current = pty;
+            log("shell started");
+            sendShell({ t: "shell-ready" });
+            if (msg.rows && msg.cols) await current.resize(msg.rows, msg.cols);
+            (async () => {
+                const reader = current.output.getReader();
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    sendShell({ t: "shell-out", d: Buffer.from(value).toString("base64") });
+                }
+                const code = await current.exited;
+                log(`shell exited (${code})`);
+                sendShell({ t: "shell-exit", code });
+            })().catch((e) => log("shell output error:", e.message));
+        } else if (msg.t === "shell-in") {
+            await ptyWriter?.write(new TextEncoder().encode(msg.d));
+        } else if (msg.t === "shell-resize") {
+            await pty?.resize(msg.rows, msg.cols);
+        } else if (msg.t === "shell-stop") {
+            closePty();
+        }
     };
     const requestKeyframe = () => {
         controller?.resetVideo().catch(() => {});
@@ -201,9 +317,19 @@ wss.on("connection", async (ws, req) => {
         } catch {
             return;
         }
-        if (msg.t === "rtc-start") {
+        if (msg.t?.startsWith("shell-")) {
+            handleShell(msg).catch((e) => {
+                log("shell error:", e.message);
+                sendShell({ t: "shell-error", message: e.message });
+            });
+        } else if (msg.t === "rtc-start") {
             rtc?.close();
-            rtc = createRtcSession({ sendSignal, onControl: handleControl, log });
+            rtc = createRtcSession({
+                sendSignal,
+                onControl: handleControl,
+                onShell: (m) => handleShell(m).catch((e) => log("shell error:", e.message)),
+                log,
+            });
             rtc.onKeyframeRequest = requestKeyframe;
             rtc.onBitrateEstimate = onBitrateEstimate;
             if (lastConfig) rtc.sendVideoPacket(lastConfig);
@@ -234,7 +360,7 @@ wss.on("connection", async (ws, req) => {
 
     try {
         const transport = await adbClient.createTransport({ serial });
-        const adb = new Adb(transport);
+        adb = new Adb(transport);
 
         // the scrcpy server unlinks its own jar right after startup, so the
         // binary must be pushed again before every start
@@ -366,6 +492,7 @@ wss.on("connection", async (ws, req) => {
         }
     } finally {
         ws.close();
+        closePty();
         rtc?.close();
         try {
             await scrcpy?.close();
@@ -524,6 +651,11 @@ async function startTunnel(backendName) {
 
 httpServer.listen(PORT, () => {
     console.log(`tango-mirror listening on http://localhost:${PORT} (scrcpy server v${VERSION})`);
+    if (SHELL_ENABLED) console.log("device shell: enabled");
+    if (TOKEN) {
+        console.log(`auth token: ${TOKEN}`);
+        console.log(`append to the page URL: ?token=${TOKEN}`);
+    }
     const backend = tunnelBackend();
     if (backend) {
         startTunnel(backend).catch((e) => console.error("tunnel failed:", e));
