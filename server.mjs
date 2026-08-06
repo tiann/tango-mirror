@@ -141,6 +141,45 @@ async function loadServerBin() {
 }
 const serverBin = await loadServerBin();
 
+const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function interstitial(target, zh) {
+    const t = zh
+        ? {
+            title: "打开 tango-mirror",
+            lead: "前端页面不通过隧道分发，以免占用隧道带宽（约 400 KB）。点击下面的链接从 CDN 打开，后端地址和 token 已经填好：",
+            open: "打开控制台",
+            selfHostTitle: "想用自己的前端？",
+            selfHost: "这个页面是纯静态的，可以自行部署（比如你自己的 GitHub Pages），然后用",
+            selfHost2: "指向它；或者用",
+            selfHost3: "让本服务直接提供页面。",
+        }
+        : {
+            title: "Open tango-mirror",
+            lead: "The frontend isn't served through the tunnel, to keep ~400 KB of bundle off it. Open it from the CDN below — the backend address and token are already filled in:",
+            open: "Open console",
+            selfHostTitle: "Prefer your own frontend?",
+            selfHost: "The page is fully static, so you can host it yourself (e.g. your own GitHub Pages) and point",
+            selfHost2: "at it, or use",
+            selfHost3: "to have this server deliver the page directly.",
+        };
+    return `<!DOCTYPE html><html lang="${zh ? "zh" : "en"}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>${t.title}</title>
+<style>:root{color-scheme:light dark}body{margin:0;min-height:100dvh;display:flex;align-items:center;
+justify-content:center;padding:24px;background:#0f1115;color:#e6e8ec;font-family:system-ui,sans-serif}
+main{max-width:34rem}h1{font-size:1.25rem;margin:0 0 .75rem}p{line-height:1.6;color:#aab2c0;margin:0 0 1rem}
+a.btn{display:inline-block;padding:12px 20px;border-radius:10px;background:#2f6fed;color:#fff;
+text-decoration:none;font-size:1rem}a.btn:hover{background:#4480f5}
+.url{word-break:break-all;font-size:.8rem;color:#6b7383;margin-top:.75rem}
+.self{margin-top:2rem;padding-top:1.25rem;border-top:1px solid #2a2f3a;font-size:.9rem}
+code{background:#171b22;padding:2px 6px;border-radius:5px;font-size:.85em;color:#c3cad6}</style></head>
+<body><main><h1>${t.title}</h1><p>${t.lead}</p>
+<a class="btn" href="${escapeHtml(target)}">${t.open} →</a>
+<p class="url">${escapeHtml(target)}</p>
+<div class="self"><p><strong>${t.selfHostTitle}</strong><br>${t.selfHost} <code>--page &lt;url&gt;</code> ${t.selfHost2} <code>--no-page</code> ${t.selfHost3}</p></div>
+</main></body></html>`;
+}
+
 const MIME = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -183,15 +222,17 @@ const httpServer = createServer(async (req, res) => {
         }
         return;
     }
-    // don't ship the bundle through the tunnel — hand remote visitors to the
-    // CDN-hosted page, carrying over the backend host and any token
+    // don't ship the ~400 KB bundle through the tunnel. an interstitial
+    // rather than a redirect: silently bouncing a visitor to another domain
+    // looks like hijacking, and self-hosters need to know how to opt out
     if (PAGE_URL && !isLocalRequest(req)) {
         const target = new URL(PAGE_URL);
         target.searchParams.set("server", req.headers.host ?? "");
         const token = url.searchParams.get("token");
         if (token) target.searchParams.set("token", token);
-        res.writeHead(302, { location: target.toString() });
-        res.end();
+        const zh = (req.headers["accept-language"] ?? "").toLowerCase().includes("zh");
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(interstitial(target.toString(), zh));
         return;
     }
     const file = url.pathname === "/" ? "/index.html" : url.pathname;

@@ -122,12 +122,14 @@ the tunnel is end-to-end encrypted.
 
 ### Page hosting
 
-Requests that arrive with a non-local `Host` (i.e. through a tunnel) are
-redirected to the hosted frontend with `server` and `token` pre-filled,
-so the ~400 KB bundle comes from a CDN and the tunnel only ever carries
-signaling and API calls. Links to the tunnel URL keep working — they
-just bounce. Point `--page` at your own deployment, or use `--no-page`
-to serve the bundled copy directly (offline / LAN-only setups).
+Requests that arrive with a non-local `Host` (i.e. through a tunnel) get
+a small notice page with a link to the hosted frontend, `server` and
+`token` pre-filled — so the ~400 KB bundle comes from a CDN and the
+tunnel only ever carries signaling and API calls. It explains itself and
+links out rather than redirecting: a silent bounce to another domain
+reads as hijacking, and it's where self-hosters find out they can point
+`--page` at their own deployment, or use `--no-page` to serve the
+bundled copy directly (offline / LAN-only setups).
 
 ### Clipboard sync
 
