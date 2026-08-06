@@ -757,7 +757,13 @@ async function startTunnel(backendName) {
     });
     let shuttingDown = false;
     let announced = false;
+    const recent = [];
     const scan = (chunk) => {
+        // keep the tail so a failed start can explain itself
+        for (const line of String(chunk).split("\n")) {
+            if (line.trim()) recent.push(line.trimEnd());
+        }
+        if (recent.length > 12) recent.splice(0, recent.length - 12);
         if (announced) return;
         const m = String(chunk).match(backend.urlPattern);
         if (m) {
@@ -772,9 +778,22 @@ async function startTunnel(backendName) {
     child.stdout.on("data", scan);
     child.stderr.on("data", scan);
     child.on("exit", (code) => {
-        if (!shuttingDown) {
-            console.error(`${name} exited with code ${code}`);
+        if (shuttingDown) return;
+        console.error(`\n${name} exited with code ${code}${announced ? "" : " before reporting a URL"}`);
+        if (recent.length) {
+            console.error(`--- ${name} output ---`);
+            for (const line of recent) console.error(`  ${line}`);
+            console.error("---");
+        } else {
+            console.error(`(${name} printed nothing; ${bin} may be an old or incompatible build)`);
         }
+        if (name === "tunwg" && !argValue("--tunnel-api") && !process.env.TUNWG_API) {
+            console.error(
+                "tunwg used its default relay (l.tunwg.com). If that relay is\n" +
+                "unreachable, point it at another one with --tunnel-api <host>.",
+            );
+        }
+        console.error(`tango-mirror is still serving on http://localhost:${PORT}\n`);
     });
     const cleanup = () => {
         shuttingDown = true;
