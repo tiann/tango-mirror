@@ -62,20 +62,31 @@ function setBadge(text, cls = "") {
 }
 
 async function loadDevices() {
-    // static hosting (e.g. GitHub Pages) needs a backend configured first
-    if (!BACKEND && location.hostname.endsWith("github.io")) {
-        deviceSelect.innerHTML = "<option value=''>请先设置后端地址（⚙）</option>";
-        promptBackend();
-        return;
-    }
     deviceSelect.innerHTML = "<option value=''>加载设备中…</option>";
     let devices = [];
     try {
-        devices = await (await fetch(`${HTTP_BASE}/api/devices`)).json();
+        const res = await fetch(`${HTTP_BASE}/api/devices`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        devices = await res.json();
     } catch {
-        deviceSelect.innerHTML = "<option value=''>加载失败，点 ⟳ 重试</option>";
+        // guide the user instead of a dead "retry": either the backend was
+        // never configured (static hosting), or the configured one is down
+        if (!BACKEND) {
+            deviceSelect.innerHTML = "<option value=''>未配置后端地址</option>";
+            setBadge("请点右上角 ⚙ 设置后端地址", "error");
+            promptBackend();
+        } else {
+            deviceSelect.innerHTML = "<option value=''>后端连接失败</option>";
+            setBadge(`连不上 ${BACKEND} — 检查服务是否在线，或点 ⚙ 修改地址`, "error");
+        }
         return;
     }
+    if (devices.length === 0) {
+        deviceSelect.innerHTML = "<option value=''>无设备 — 请先 adb connect</option>";
+        setBadge("后端正常，但没有已连接的设备", "error");
+        return;
+    }
+    setBadge("");
     deviceSelect.innerHTML = "<option value=''>选择设备…</option>";
     for (const d of devices) {
         const opt = document.createElement("option");
