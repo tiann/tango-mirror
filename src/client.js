@@ -9,6 +9,85 @@ const ICE_SERVERS = [
     { urls: "stun:stun.l.google.com:19302" },
 ];
 
+const STRINGS = {
+    zh: {
+        refresh: "刷新设备列表",
+        fullscreen: "全屏",
+        settings: "后端地址",
+        quality: "画质",
+        sound: "声音",
+        power: "电源",
+        back: "返回",
+        home: "主页",
+        recents: "最近任务",
+        keyboard: "键盘",
+        qAuto: "自动",
+        qLow: "流畅",
+        qMedium: "平衡",
+        qHigh: "高清",
+        kbdPlaceholder: "输入文字，回车发送到设备",
+        send: "发送",
+        emptyStage: "选择设备开始镜像",
+        loadingDevices: "加载设备中…",
+        noBackend: "未配置后端地址",
+        noBackendHint: "请点右上角 ⚙ 设置后端地址",
+        backendDown: "后端连接失败",
+        backendDownHint: (b) => `连不上 ${b} — 检查服务是否在线，或点 ⚙ 修改地址`,
+        noDevices: "无设备 — 请先 adb connect",
+        noDevicesHint: "后端正常，但没有已连接的设备",
+        selectDevice: "选择设备…",
+        device: "设备",
+        connecting: "连接中…",
+        error: (m) => `出错：${m}`,
+        decodeError: (m) => `解码出错：${m}`,
+        disconnected: "连接已断开",
+        downshift: (p) => `网络受限，已降为${p}`,
+        backendPrompt: "后端地址（tango-mirror 服务的域名，如 xxx.relay.hapi.run）：",
+    },
+    en: {
+        refresh: "Refresh devices",
+        fullscreen: "Fullscreen",
+        settings: "Backend address",
+        quality: "Quality",
+        sound: "Sound",
+        power: "Power",
+        back: "Back",
+        home: "Home",
+        recents: "Recents",
+        keyboard: "Keyboard",
+        qAuto: "Auto",
+        qLow: "Smooth",
+        qMedium: "Balanced",
+        qHigh: "HD",
+        kbdPlaceholder: "Type text, press Enter to send",
+        send: "Send",
+        emptyStage: "Select a device to start mirroring",
+        loadingDevices: "Loading devices…",
+        noBackend: "Backend not configured",
+        noBackendHint: "Tap ⚙ in the top bar to set the backend address",
+        backendDown: "Backend unreachable",
+        backendDownHint: (b) => `Cannot reach ${b} — check the service, or tap ⚙ to change it`,
+        noDevices: "No devices — run adb connect first",
+        noDevicesHint: "Backend is up, but no devices are connected",
+        selectDevice: "Select device…",
+        device: "Device",
+        connecting: "Connecting…",
+        error: (m) => `Error: ${m}`,
+        decodeError: (m) => `Decode error: ${m}`,
+        disconnected: "Disconnected",
+        downshift: (p) => `Network limited, switched to ${p}`,
+        backendPrompt: "Backend address (your tango-mirror server's domain, e.g. xxx.relay.hapi.run):",
+    },
+};
+
+// language: ?lang= param (persisted) > saved choice > browser language
+const langParam = new URLSearchParams(location.search).get("lang");
+if (langParam) localStorage.setItem("tango-lang", langParam);
+const LANG = (localStorage.getItem("tango-lang") || navigator.language || "en")
+    .toLowerCase()
+    .startsWith("zh") ? "zh" : "en";
+const t = STRINGS[LANG];
+
 // backend resolution: ?server= param > saved value > same-origin.
 // lets the static page live on GitHub Pages while the backend sits
 // behind a tunnel; the ⚙ button changes it at runtime.
@@ -23,7 +102,7 @@ const WS_BASE = BACKEND
     : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
 
 function promptBackend() {
-    const input = prompt("后端地址（tango-mirror 服务的域名，如 xxx.relay.hapi.run）：", BACKEND);
+    const input = prompt(t.backendPrompt, BACKEND);
     if (input === null) return;
     localStorage.setItem("tango-backend", input.trim().replace(/^[a-z]+:\/\//, "").replace(/\/$/, ""));
     location.reload();
@@ -37,7 +116,21 @@ const badgeEl = $("status-badge");
 const kbdBar = $("kbdbar");
 const kbdInput = $("kbd-input");
 
-const PRESET_NAMES = { low: "流畅", medium: "平衡", high: "高清" };
+const PRESET_NAMES = { low: t.qLow, medium: t.qMedium, high: t.qHigh };
+
+// apply translations to the static page
+document.documentElement.lang = LANG;
+for (const [id, key] of [
+    ["refresh", "refresh"], ["btn-fullscreen", "fullscreen"], ["btn-settings", "settings"],
+    ["quality-select", "quality"], ["btn-mute", "sound"], ["btn-power", "power"],
+    ["btn-back", "back"], ["btn-home", "home"], ["btn-recents", "recents"], ["btn-kbd", "keyboard"],
+]) $(id).title = t[key];
+for (const opt of qualitySelect.options) {
+    opt.textContent = { auto: t.qAuto, low: t.qLow, medium: t.qMedium, high: t.qHigh }[opt.value];
+}
+kbdInput.placeholder = t.kbdPlaceholder;
+$("kbd-send").textContent = t.send;
+stageEl.dataset.emptyHint = t.emptyStage;
 
 let ws = null;
 let decoder = null;
@@ -62,7 +155,14 @@ function setBadge(text, cls = "") {
 }
 
 async function loadDevices() {
-    deviceSelect.innerHTML = "<option value=''>加载设备中…</option>";
+    const placeholder = (text) => {
+        deviceSelect.innerHTML = "";
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = text;
+        deviceSelect.appendChild(opt);
+    };
+    placeholder(t.loadingDevices);
     let devices = [];
     try {
         const res = await fetch(`${HTTP_BASE}/api/devices`);
@@ -72,26 +172,26 @@ async function loadDevices() {
         // guide the user instead of a dead "retry": either the backend was
         // never configured (static hosting), or the configured one is down
         if (!BACKEND) {
-            deviceSelect.innerHTML = "<option value=''>未配置后端地址</option>";
-            setBadge("请点右上角 ⚙ 设置后端地址", "error");
+            placeholder(t.noBackend);
+            setBadge(t.noBackendHint, "error");
             promptBackend();
         } else {
-            deviceSelect.innerHTML = "<option value=''>后端连接失败</option>";
-            setBadge(`连不上 ${BACKEND} — 检查服务是否在线，或点 ⚙ 修改地址`, "error");
+            placeholder(t.backendDown);
+            setBadge(t.backendDownHint(BACKEND), "error");
         }
         return;
     }
     if (devices.length === 0) {
-        deviceSelect.innerHTML = "<option value=''>无设备 — 请先 adb connect</option>";
-        setBadge("后端正常，但没有已连接的设备", "error");
+        placeholder(t.noDevices);
+        setBadge(t.noDevicesHint, "error");
         return;
     }
     setBadge("");
-    deviceSelect.innerHTML = "<option value=''>选择设备…</option>";
+    placeholder(t.selectDevice);
     for (const d of devices) {
         const opt = document.createElement("option");
         opt.value = d.serial;
-        opt.textContent = `${d.model?.replaceAll("_", " ") ?? d.product ?? "设备"} · ${d.serial}`;
+        opt.textContent = `${d.model?.replaceAll("_", " ") ?? d.product ?? t.device} · ${d.serial}`;
         deviceSelect.appendChild(opt);
     }
     // one device only: connect right away, no extra tap needed
@@ -146,7 +246,7 @@ function disconnect() {
 function connect(serial) {
     disconnect();
     currentSerial = serial;
-    setBadge("连接中…");
+    setBadge(t.connecting);
     ws = new WebSocket(`${WS_BASE}/api/stream?serial=${encodeURIComponent(serial)}`);
     ws.binaryType = "arraybuffer";
     // negotiate WebRTC immediately, in parallel with scrcpy startup
@@ -161,7 +261,7 @@ function connect(serial) {
                 if (path !== "rtc") setBadge("WS");
             } else if (msg.type === "quality") {
                 // server auto-downshifted under congestion
-                setBadge(`网络受限，已降为${PRESET_NAMES[msg.preset] ?? msg.preset}`, "p2p");
+                setBadge(t.downshift(PRESET_NAMES[msg.preset] ?? msg.preset), "p2p");
             } else if (msg.type === "clipboard") {
                 lastClipFromDevice = msg.text;
                 navigator.clipboard?.writeText(msg.text).catch(() => {});
@@ -169,7 +269,7 @@ function connect(serial) {
                 lastSize = `${msg.width}×${msg.height}`;
                 if (path !== "rtc") setBadge(`${lastSize} · WS`);
             } else if (msg.type === "error") {
-                setBadge(`出错：${msg.message}`, "error");
+                setBadge(t.error(msg.message), "error");
             } else if (msg.t === "rtc-offer") {
                 acceptRtcOffer(msg.sdp).catch((e) => {
                     console.warn("webrtc setup failed:", e);
@@ -190,11 +290,11 @@ function connect(serial) {
         try {
             await writer.write(packet);
         } catch (e) {
-            setBadge(`解码出错：${e.message}`, "error");
+            setBadge(t.decodeError(e.message), "error");
         }
     };
     ws.onclose = () => {
-        if (currentSerial === serial) setBadge("连接已断开", "error");
+        if (currentSerial === serial) setBadge(t.disconnected, "error");
     };
 }
 

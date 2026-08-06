@@ -35,6 +35,9 @@ Two tunnel backends are supported:
 Note: the page uses WebCodecs, which requires a secure context
 (`https://` or `localhost`).
 
+The UI is localized (中文/English), following the browser language;
+override with `?lang=en` / `?lang=zh` (remembered afterwards).
+
 ## Options
 
 | Flag | Env | Default | |
