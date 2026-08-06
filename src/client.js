@@ -21,6 +21,8 @@ async function loadXterm() {
         css.default ?? css;
 }
 
+// STUN only — TURN servers, when the backend has them (--turn), arrive
+// with the WebRTC offer
 const ICE_SERVERS = [
     { urls: "stun:stun.cloudflare.com:3478" },
     { urls: "stun:stun.l.google.com:19302" },
@@ -322,7 +324,7 @@ function connect(serial) {
             } else if (msg.type === "error") {
                 setBadge(t.error(msg.message), "error");
             } else if (msg.t === "rtc-offer") {
-                acceptRtcOffer(msg.sdp).catch((e) => {
+                acceptRtcOffer(msg.sdp, msg.iceServers).catch((e) => {
                     console.warn("webrtc setup failed:", e);
                     teardownRtc();
                 });
@@ -379,8 +381,8 @@ function tryWebRtc() {
     sendWs({ t: "rtc-start" });
 }
 
-async function acceptRtcOffer(sdp) {
-    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+async function acceptRtcOffer(sdp, extraIce) {
+    pc = new RTCPeerConnection({ iceServers: [...ICE_SERVERS, ...(extraIce ?? [])] });
     pc.onicecandidate = (e) => {
         if (e.candidate) sendWs({ t: "rtc-ice", candidate: e.candidate.toJSON() });
     };

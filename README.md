@@ -74,6 +74,7 @@ the token that's printed at startup — it's already embedded in the links.
 | Hear the device | Click 🔇 (audio only flows in P2P mode) |
 | Use a different port | `--port 9000` |
 | Keep the same URL across restarts | Use the tunwg backend — its URL is derived from a local key and stays stable |
+| Keep video off the tunnel when P2P fails | Add a TURN relay, e.g. `--turn cloudflare` — see [TURN](#turn-keeping-the-fallback-off-your-relay) |
 | Lock down viewing too, not just the shell | `--token yoursecret` |
 | Run without any external site | `--no-page` (serves the UI itself) |
 
@@ -91,6 +92,9 @@ Run `tango-mirror --help` for the same list.
 | `--tunnel [backend]` | — | off | expose publicly; `tunwg`, `cloudflared`, or auto |
 | `--tunnel-api` | `TUNWG_API` | `relay.hapi.run` | tunwg relay server |
 | `--tunnel-auth` | — | off | basic auth `user:pass` (tunwg only) |
+| `--turn <target>` | `TURN_URL` | off | TURN relay for failed P2P: `cloudflare` or a `turn:`/`turns:` URL |
+| `--turn-auth` | `TURN_AUTH` | — | `user:pass` for a `--turn` URL |
+| — | `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN` | — | Cloudflare TURN key, used by `--turn cloudflare` |
 | `--page` | `TANGO_PAGE` | project page | frontend to point remote visitors at |
 | `--no-page` | — | off | serve the bundled page instead |
 | `--no-qr` | — | off | don't print the QR code |
@@ -114,7 +118,9 @@ keeps working either way.
 
 **Stuck on `WS` instead of `P2P`** — WebRTC couldn't establish a direct path
 (symmetric NAT or CGNAT on one side). Everything still works through the
-tunnel, just with more latency and tunnel traffic.
+tunnel, just with more latency and tunnel traffic. A TURN relay
+([`--turn`](#turn-keeping-the-fallback-off-your-relay)) usually gets such
+connections onto WebRTC anyway.
 
 **Shell button missing** — the server wasn't started with `--shell`, or the
 page was opened without the token. Use the link printed at startup.
@@ -169,6 +175,30 @@ and it only routes TLS bytes by SNI.
 - **[cloudflared](https://github.com/cloudflare/cloudflared/releases)** —
   zero setup, but the URL is random per run and TLS terminates at
   Cloudflare's edge, so they can see the traffic.
+
+### TURN: keeping the fallback off your relay
+
+When WebRTC can't find a direct path (symmetric NAT or CGNAT), video falls
+back to the WebSocket — and the full stream rides the tunnel. If that
+tunnel is a tunwg relay you host, that's your bandwidth bill. Point
+`--turn` at a TURN server and the fallback stays on WebRTC instead:
+
+```bash
+# Cloudflare TURN (1,000 GB/month free): create a TURN key under
+# Realtime → TURN in the Cloudflare dashboard, then
+CF_TURN_KEY_ID=… CF_TURN_API_TOKEN=… tango-mirror --tunnel --turn cloudflare
+```
+
+`--turn` takes two forms: `cloudflare`, which mints short-lived credentials
+on demand, or a `turn:`/`turns:` URL plus `--turn-auth user:pass` for your
+own coturn or any provider that hands out static credentials (Metered,
+ExpressTURN, …). Either way the credentials ride to the browser with the
+WebRTC offer — nothing to configure on the viewing side.
+
+Media through TURN stays DTLS-encrypted end to end; the relay forwards
+packets it cannot read, so a third-party TURN service gets no eyes on your
+screen. There is no default TURN server — the once-popular free public
+relays (Open Relay and friends) are dead.
 
 ### Hosting the frontend yourself
 

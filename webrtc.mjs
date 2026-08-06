@@ -95,7 +95,15 @@ function splitAnnexB(data) {
     return nalus;
 }
 
-export function createRtcSession({ sendSignal, onControl, onShell, log }) {
+export function createRtcSession({ sendSignal, onControl, onShell, log, iceServers = [] }) {
+    // werift's ICE stack speaks turn: over UDP/TCP; turns: (TLS) is left to
+    // the browser, which is the side that usually needs it
+    const nodeIce = iceServers
+        .map((s) => ({
+            ...s,
+            urls: (Array.isArray(s.urls) ? s.urls : [s.urls]).filter((u) => /^turn:/i.test(u)),
+        }))
+        .filter((s) => s.urls.length);
     const pc = new RTCPeerConnection({
         codecs: {
             video: [
@@ -121,7 +129,7 @@ export function createRtcSession({ sendSignal, onControl, onShell, log }) {
                 }),
             ],
         },
-        iceServers: DEFAULT_ICE_SERVERS,
+        iceServers: [...DEFAULT_ICE_SERVERS, ...nodeIce],
     });
 
     const videoTrack = new MediaStreamTrack({ kind: "video" });
@@ -192,7 +200,8 @@ export function createRtcSession({ sendSignal, onControl, onShell, log }) {
         async start() {
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
-            sendSignal({ t: "rtc-offer", sdp: pc.localDescription.sdp });
+            // TURN servers ride along so the browser can add a relay candidate
+            sendSignal({ t: "rtc-offer", sdp: pc.localDescription.sdp, iceServers });
         },
         async handleAnswer(sdp) {
             await pc.setRemoteDescription({ type: "answer", sdp });

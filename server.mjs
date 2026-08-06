@@ -53,17 +53,24 @@ Options:
       --tunnel-api <host> tunwg relay server           (default ${DEFAULT_TUNWG_RELAY})
       --tunnel-auth <u:p> basic auth for the tunnel (tunwg only)
 
+      --turn <target>     TURN relay for when direct P2P fails: "cloudflare"
+                          (reads CF_TURN_KEY_ID + CF_TURN_API_TOKEN) or a
+                          turn:/turns: URL used with --turn-auth
+      --turn-auth <u:p>   credentials for a --turn turn:/turns: URL
+
   -h, --help              show this help
   -v, --version           show version
 
 Environment:
   PORT, ADB_HOST, ADB_PORT, TANGO_TOKEN, TANGO_PAGE, TUNWG_API,
-  TUNWG_BIN, CLOUDFLARED_PATH
+  TUNWG_BIN, CLOUDFLARED_PATH, TURN_URL, TURN_AUTH, CF_TURN_KEY_ID,
+  CF_TURN_API_TOKEN
 
 Examples:
   tango-mirror                                   # local only
   tango-mirror --tunnel                          # + public tunnel
   tango-mirror --shell --tunnel                  # + device shell (tokened)
+  tango-mirror --tunnel --turn cloudflare        # fallback via Cloudflare TURN
   tango-mirror --shell --page https://me.github.io/tango-mirror/
 
 The devices must already be visible to adb (adb connect <ip> / USB).
@@ -84,7 +91,8 @@ if (process.argv.includes("--version") || process.argv.includes("-v")) {
 // catch typo'd flags instead of silently ignoring them
 const KNOWN_FLAGS = new Set([
     "--port", "-p", "--adb-host", "--adb-port", "--shell", "--token", "--page",
-    "--tunnel", "--tunnel-api", "--tunnel-auth", "--no-page", "--no-qr",
+    "--tunnel", "--tunnel-api", "--tunnel-auth", "--turn", "--turn-auth",
+    "--no-page", "--no-qr",
     "--help", "-h", "--version", "-v",
 ]);
 for (const arg of process.argv.slice(2)) {
@@ -113,6 +121,68 @@ const VIEW_NEEDS_TOKEN = Boolean(EXPLICIT_TOKEN);
 const PAGE_URL = process.argv.includes("--no-page")
     ? ""
     : argValue("--page") ?? process.env.TANGO_PAGE ?? DEFAULT_PAGE;
+
+// Without TURN, a viewer that can't get a direct WebRTC path (symmetric
+// NAT, CGNAT) falls back to video over the WebSocket — the whole stream
+// rides the tunnel relay. With TURN the fallback stays on WebRTC, still
+// DTLS-encrypted end to end; the relay forwards packets it cannot read.
+const TURN_TARGET = argValue("--turn") ?? process.env.TURN_URL ?? "";
+const TURN_AUTH = argValue("--turn-auth") ?? process.env.TURN_AUTH ?? "";
+if (TURN_TARGET === "cloudflare") {
+    if (!process.env.CF_TURN_KEY_ID || !process.env.CF_TURN_API_TOKEN) {
+        console.error("--turn cloudflare needs CF_TURN_KEY_ID and CF_TURN_API_TOKEN in the environment");
+        process.exit(1);
+    }
+} else if (/^turns?:/i.test(TURN_TARGET)) {
+    if (!TURN_AUTH.includes(":")) {
+        console.error("--turn with a turn:/turns: URL needs --turn-auth user:pass (or TURN_AUTH)");
+        process.exit(1);
+    }
+} else if (TURN_TARGET) {
+    console.error(`--turn: expected "cloudflare" or a turn:/turns: URL, got "${TURN_TARGET}"`);
+    process.exit(1);
+}
+// static credentials resolve once; cloudflare mints on demand in turnServers()
+const TURN_STATIC = /^turns?:/i.test(TURN_TARGET)
+    ? [{
+          urls: TURN_TARGET.split(",").map((u) => u.trim()),
+          username: TURN_AUTH.slice(0, TURN_AUTH.indexOf(":")),
+          credential: TURN_AUTH.slice(TURN_AUTH.indexOf(":") + 1),
+      }]
+    : null;
+
+let turnCache = null;
+async function turnServers() {
+    if (!TURN_TARGET) return [];
+    if (TURN_STATIC) return TURN_STATIC;
+    if (turnCache && Date.now() < turnCache.expires) return turnCache.servers;
+    const res = await fetch(
+        `https://rtc.live.cloudflare.com/v1/turn/keys/${process.env.CF_TURN_KEY_ID}/credentials/generate-ice-servers`,
+        {
+            method: "POST",
+            headers: {
+                authorization: `Bearer ${process.env.CF_TURN_API_TOKEN}`,
+                "content-type": "application/json",
+            },
+            body: JSON.stringify({ ttl: 86400 }),
+            signal: AbortSignal.timeout(5000),
+        },
+    );
+    if (!res.ok) throw new Error(`cloudflare credentials: HTTP ${res.status}`);
+    const raw = (await res.json()).iceServers ?? [];
+    // keep only turn(s): urls — the page has STUN built in — and drop the
+    // :53 variants, which browsers refuse to use
+    const servers = (Array.isArray(raw) ? raw : [raw])
+        .map((s) => ({
+            ...s,
+            urls: (Array.isArray(s.urls) ? s.urls : [s.urls])
+                .filter((u) => /^turns?:/i.test(u) && !/:53(\D|$)/.test(u)),
+        }))
+        .filter((s) => s.urls.length);
+    if (!servers.length) throw new Error("no turn(s): urls in cloudflare response");
+    turnCache = { servers, expires: Date.now() + 12 * 3600 * 1000 }; // half the ttl
+    return servers;
+}
 
 const LOCAL_HOST = /^(localhost|127\.\d+\.\d+\.\d+|\[?::1\]?|0\.0\.0\.0|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/;
 
@@ -347,6 +417,7 @@ wss.on("connection", async (ws, req) => {
     }
     let scrcpy;
     let rtc = null;
+    let rtcGen = 0; // invalidates a pending TURN fetch when rtc-start reruns
     let controller = null;
     let video = null;
     let videoPath = "ws";
@@ -511,16 +582,28 @@ wss.on("connection", async (ws, req) => {
             });
         } else if (msg.t === "rtc-start") {
             rtc?.close();
-            rtc = createRtcSession({
-                sendSignal,
-                onControl: handleControl,
-                onShell: (m) => handleShell(m).catch((e) => log("shell error:", e.message)),
-                log,
-            });
-            rtc.onKeyframeRequest = requestKeyframe;
-            rtc.onBitrateEstimate = onBitrateEstimate;
-            if (lastConfig) rtc.sendVideoPacket(lastConfig);
-            rtc.start().catch((e) => log("webrtc offer error:", e.message));
+            rtc = null;
+            const gen = ++rtcGen;
+            (async () => {
+                let turn = [];
+                try {
+                    turn = await turnServers();
+                } catch (e) {
+                    log("turn credentials unavailable, continuing with STUN only:", e.message);
+                }
+                if (gen !== rtcGen || ws.readyState !== ws.OPEN) return;
+                rtc = createRtcSession({
+                    sendSignal,
+                    onControl: handleControl,
+                    onShell: (m) => handleShell(m).catch((e) => log("shell error:", e.message)),
+                    log,
+                    iceServers: turn,
+                });
+                rtc.onKeyframeRequest = requestKeyframe;
+                rtc.onBitrateEstimate = onBitrateEstimate;
+                if (lastConfig) rtc.sendVideoPacket(lastConfig);
+                rtc.start().catch((e) => log("webrtc offer error:", e.message));
+            })();
         } else if (msg.t === "quality") {
             if (msg.preset === "auto") {
                 autoQuality = true;
