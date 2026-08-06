@@ -55,6 +55,16 @@ npx tango-mirror --tunnel
 Scan the QR code or open the printed link. The tunnel gives you a public
 HTTPS address; no router or firewall changes needed.
 
+**From anywhere, without any tunnel**
+
+```bash
+npx tango-mirror --signal --turn cloudflare
+```
+
+No tunnel process, nothing hosted, and the printed link never changes: the
+page meets your host through encrypted messages on public MQTT brokers, and
+everything else is WebRTC. See [Serverless signaling](#serverless-signaling).
+
 **Between two computers, no relay at all**
 
 Install [wush](https://github.com/coder/wush/releases) on both machines,
@@ -109,6 +119,8 @@ Run `tango-mirror --help` for the same list.
 | `--tunnel-auth` | — | off | basic auth `user:pass` (tunwg only) |
 | `--turn <target>` | `TURN_URL` | off | TURN relay for failed P2P: `cloudflare` or a `turn:`/`turns:` URL |
 | `--turn-auth` | `TURN_AUTH` | — | `user:pass` for a `--turn` URL |
+| `--signal` | — | off | tunnel-free mode: signaling via public MQTT brokers, media via WebRTC |
+| `--signal-broker` | `TANGO_SIGNAL_BROKERS` | 3 public brokers | comma-separated `wss://` broker list |
 | — | `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN` | — | Cloudflare TURN key, used by `--turn cloudflare` |
 | `--page` | `TANGO_PAGE` | project page | frontend to point remote visitors at |
 | `--no-page` | — | off | serve the bundled page instead |
@@ -226,6 +238,30 @@ Media through TURN stays DTLS-encrypted end to end; the relay forwards
 packets it cannot read, so a third-party TURN service gets no eyes on your
 screen. There is no default TURN server — the once-popular free public
 relays (Open Relay and friends) are dead.
+
+### Serverless signaling
+
+In P2P mode a tunnel does two small jobs: give the browser a URL, and carry
+a few KB of SDP/ICE. `--signal` does both without any tunnel:
+
+```bash
+tango-mirror --signal --turn cloudflare
+```
+
+The printed link is `<page>#k=<key>`. The key is generated locally and kept
+in `~/.config/tango-mirror/`, so the link is stable across restarts — and
+because it travels in the URL fragment, it is never sent to any server. Host
+and page meet on public MQTT brokers (EMQX intl + CN, HiveMQ by default;
+override with `--signal-broker`), where every message is AES-256-GCM
+encrypted with that key and the topic is a one-way hash of it. Brokers see
+ciphertext and timing, nothing else.
+
+Only session control rides the brokers. Media is WebRTC-only on this path —
+there is no WebSocket video fallback, so pair it with `--turn` if your
+viewers may sit behind symmetric NAT or CGNAT. Compared to the tunnel
+backends: no process to install, no relay anyone pays for, a stable link,
+and end-to-end encryption; the trade-offs are a couple of seconds of extra
+connect time and the WebRTC requirement.
 
 ### Hosting the frontend yourself
 

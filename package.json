@@ -9,6 +9,7 @@
   "files": [
     "server.mjs",
     "webrtc.mjs",
+    "signal.mjs",
     "public/",
     "server.bin",
     "scrcpy-server.LICENSE"

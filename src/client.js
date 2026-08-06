@@ -3,6 +3,7 @@ import {
     WebGLVideoFrameRenderer,
     BitmapVideoFrameRenderer,
 } from "@yume-chan/scrcpy-decoder-webcodecs";
+import { SignalRoom, b64u } from "../signal.mjs";
 // xterm is ~300 KB of the bundle and only matters once the shell is opened,
 // so it loads on demand
 let Terminal = null;
@@ -67,6 +68,9 @@ const STRINGS = {
         shellExited: (c) => `会话结束，退出码 ${c}`,
         unauthorized: "认证失败",
         unauthorizedHint: "token 无效或缺失 — 用启动日志里的 ?token=… 链接打开",
+        signalDown: "联系不到主机",
+        signalDownHint: "确认主机正以 --signal 运行且在线，然后刷新",
+        p2pFailed: "P2P 连接失败 — 在主机侧加 --turn 可解决",
     },
     en: {
         refresh: "Refresh devices",
@@ -106,6 +110,9 @@ const STRINGS = {
         shellExited: (c) => `session ended, exit code ${c}`,
         unauthorized: "Unauthorized",
         unauthorizedHint: "Missing or invalid token — open the ?token=… link from the server log",
+        signalDown: "Can't reach the host",
+        signalDownHint: "Make sure the host is running with --signal, then refresh",
+        p2pFailed: "P2P failed — add --turn on the host to fix this",
     },
 };
 
@@ -124,13 +131,21 @@ const backendParam = new URLSearchParams(location.search).get("server");
 if (backendParam !== null) {
     localStorage.setItem("tango-backend", backendParam.replace(/^[a-z]+:\/\//, "").replace(/\/$/, ""));
 }
-// token arrives via ?token=, then is scrubbed from the URL so it doesn't
-// linger in history or get shared along with the link
-const tokenParam = new URLSearchParams(location.search).get("token");
+// serverless signaling (#k=… from a --signal host): the key stays in the
+// fragment — it never reaches any server, and the page needs it on reload
+const frag = new URLSearchParams(location.hash.slice(1));
+const SIGNAL_KEY = frag.get("k") || "";
+const SIGNAL = Boolean(SIGNAL_KEY);
+
+// token arrives via ?token= (or #…&t= in signal links), then is scrubbed
+// from the URL so it doesn't linger in history or get shared along
+const tokenParam = new URLSearchParams(location.search).get("token") ?? frag.get("t");
 if (tokenParam !== null) {
     localStorage.setItem("tango-token", tokenParam);
     const clean = new URL(location.href);
     clean.searchParams.delete("token");
+    frag.delete("t");
+    clean.hash = frag.toString();
     history.replaceState(null, "", clean);
 }
 const TOKEN = localStorage.getItem("tango-token") || "";
@@ -207,7 +222,20 @@ async function loadDevices() {
     };
     placeholder(t.loadingDevices);
     let devices = [];
-    try {
+    if (SIGNAL) {
+        try {
+            devices = await signalDevices();
+        } catch (e) {
+            if (e.message === "unauthorized") {
+                placeholder(t.unauthorized);
+                setBadge(t.unauthorizedHint, "error");
+            } else {
+                placeholder(t.signalDown);
+                setBadge(t.signalDownHint, "error");
+            }
+            return;
+        }
+    } else try {
         const res = await fetch(`${HTTP_BASE}/api/devices`, {
             headers: TOKEN ? { authorization: `Bearer ${TOKEN}` } : {},
         });
@@ -251,6 +279,91 @@ async function loadDevices() {
     } else if (currentSerial && devices.some((d) => d.serial === currentSerial)) {
         deviceSelect.value = currentSerial;
     }
+}
+
+// ---- serverless signaling (--signal hosts) --------------------------------
+// The room replaces both /api/devices and the /api/stream WebSocket with
+// encrypted messages on public MQTT brokers, addressed per-session by sid.
+// There is no WS video fallback on this path — media is WebRTC-only.
+
+let signalRoom = null;
+let roomPromise = null;
+const signalRoutes = new Map(); // sid -> handler
+
+function ensureRoom() {
+    roomPromise ??= SignalRoom.create({ key: b64u.decode(SIGNAL_KEY), role: "viewer" }).then((room) => {
+        signalRoom = room;
+        room.onmessage = (msg) => signalRoutes.get(msg.sid)?.(msg);
+        return room;
+    });
+    return roomPromise;
+}
+
+const randSid = () =>
+    Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("");
+
+async function signalDevices() {
+    await ensureRoom();
+    const sid = randSid();
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            signalRoutes.delete(sid);
+            reject(new Error("timeout"));
+        }, 12000);
+        signalRoutes.set(sid, (msg) => {
+            clearTimeout(timer);
+            signalRoutes.delete(sid);
+            if (msg.error) reject(new Error(msg.error));
+            else resolve(msg.devices ?? []);
+        });
+        signalRoom.send({ sid, t: "devices", token: TOKEN || undefined });
+    });
+}
+
+// quacks like the WebSocket connect() expects: send/close/onopen/onmessage/
+// onclose/readyState — so the whole session protocol runs unchanged
+function signalChannel(serial) {
+    const sid = randSid();
+    let hb = null;
+    const chan = {
+        readyState: WebSocket.CONNECTING,
+        binaryType: "",
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        send(s) {
+            signalRoom?.send({ sid, ...JSON.parse(s) });
+        },
+        close() {
+            if (chan.readyState === WebSocket.OPEN) signalRoom?.send({ sid, t: "bye" });
+            chan.readyState = WebSocket.CLOSED;
+            clearInterval(hb);
+            signalRoutes.delete(sid);
+        },
+    };
+    ensureRoom().then(() => {
+        if (chan.readyState === WebSocket.CLOSED) return;
+        signalRoutes.set(sid, (msg) => {
+            if (msg.t === "bye") {
+                const wasOpen = chan.readyState === WebSocket.OPEN;
+                chan.readyState = WebSocket.CLOSED;
+                clearInterval(hb);
+                signalRoutes.delete(sid);
+                if (wasOpen) chan.onclose?.({ code: msg.code ?? 1000 });
+            } else {
+                chan.onmessage?.({ data: JSON.stringify(msg) });
+            }
+        });
+        signalRoom.send({ sid, t: "open", serial, token: TOKEN || undefined });
+        // brokers give no liveness signal for the peer; the host times a
+        // session out after 90 s without traffic, so keep it warm
+        hb = setInterval(() => signalRoom.send({ sid, t: "ping" }), 25000);
+        chan.readyState = WebSocket.OPEN;
+        chan.onopen?.();
+    }).catch(() => {
+        setBadge(t.signalDownHint, "error");
+    });
+    return chan;
 }
 
 function sendWs(obj) {
@@ -298,8 +411,12 @@ function connect(serial) {
     disconnect();
     currentSerial = serial;
     setBadge(t.connecting);
-    const url = `${WS_BASE}/api/stream?serial=${encodeURIComponent(serial)}`;
-    ws = TOKEN ? new WebSocket(url, [`tango.token.${TOKEN}`]) : new WebSocket(url);
+    if (SIGNAL) {
+        ws = signalChannel(serial);
+    } else {
+        const url = `${WS_BASE}/api/stream?serial=${encodeURIComponent(serial)}`;
+        ws = TOKEN ? new WebSocket(url, [`tango.token.${TOKEN}`]) : new WebSocket(url);
+    }
     ws.binaryType = "arraybuffer";
     // negotiate WebRTC immediately, in parallel with scrcpy startup
     ws.onopen = () => tryWebRtc();
@@ -377,7 +494,10 @@ function startDecoder(codec) {
 }
 
 function tryWebRtc() {
-    if (typeof RTCPeerConnection === "undefined") return;
+    if (typeof RTCPeerConnection === "undefined") {
+        if (SIGNAL) setBadge(t.p2pFailed, "error");
+        return;
+    }
     sendWs({ t: "rtc-start" });
 }
 
@@ -457,6 +577,9 @@ function watchRtcStats() {
                 if (ticksWithoutDecode >= 20) {
                     console.warn("webrtc: giving up, staying on WebSocket path");
                     teardownRtc();
+                    // no WS video exists on the signaling path — say why
+                    // the screen is black instead of silently showing it
+                    if (SIGNAL) setBadge(t.p2pFailed, "error");
                 }
             }
             return;

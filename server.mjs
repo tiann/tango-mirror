@@ -8,7 +8,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, delimiter } from "node:path";
-import { WebSocketServer } from "ws";
+import { EventEmitter } from "node:events";
+import { WebSocketServer, WebSocket as WsClient } from "ws";
 import { Adb, AdbServerClient } from "@yume-chan/adb";
 import { AdbServerNodeTcpConnector } from "@yume-chan/adb-server-node-tcp";
 import { AdbScrcpyClient, AdbScrcpyOptions3_1 } from "@yume-chan/adb-scrcpy";
@@ -16,6 +17,7 @@ import { ReadableStream } from "@yume-chan/stream-extra";
 import { ScrcpyPointerId, ScrcpyInstanceId, AndroidMotionEventAction } from "@yume-chan/scrcpy";
 import qrcode from "qrcode-terminal";
 import { createRtcSession } from "./webrtc.mjs";
+import { SignalRoom, DEFAULT_BROKERS, b64u } from "./signal.mjs";
 
 function argValue(...names) {
     for (const name of names) {
@@ -60,13 +62,18 @@ Options:
                           turn:/turns: URL used with --turn-auth
       --turn-auth <u:p>   credentials for a --turn turn:/turns: URL
 
+      --signal            serverless mode: no tunnel — the page meets this
+                          host via encrypted messages on public MQTT
+                          brokers; media is WebRTC-only (pair with --turn)
+      --signal-broker <l> comma-separated wss:// brokers to use instead
+
   -h, --help              show this help
   -v, --version           show version
 
 Environment:
   PORT, ADB_HOST, ADB_PORT, TANGO_TOKEN, TANGO_PAGE, TUNWG_API,
   TUNWG_BIN, CLOUDFLARED_PATH, WUSH_BIN, TURN_URL, TURN_AUTH,
-  CF_TURN_KEY_ID, CF_TURN_API_TOKEN
+  CF_TURN_KEY_ID, CF_TURN_API_TOKEN, TANGO_SIGNAL_BROKERS
 
 Examples:
   tango-mirror                                   # local only
@@ -74,6 +81,7 @@ Examples:
   tango-mirror --shell --tunnel                  # + device shell (tokened)
   tango-mirror --tunnel --turn cloudflare        # fallback via Cloudflare TURN
   tango-mirror --tunnel wush                     # P2P to another computer
+  tango-mirror --signal --turn cloudflare        # no tunnel at all
   tango-mirror --shell --page https://me.github.io/tango-mirror/
 
 The devices must already be visible to adb (adb connect <ip> / USB).
@@ -95,7 +103,7 @@ if (process.argv.includes("--version") || process.argv.includes("-v")) {
 const KNOWN_FLAGS = new Set([
     "--port", "-p", "--adb-host", "--adb-port", "--shell", "--token", "--page",
     "--tunnel", "--tunnel-api", "--tunnel-auth", "--turn", "--turn-auth",
-    "--no-page", "--no-qr",
+    "--signal", "--signal-broker", "--no-page", "--no-qr",
     "--help", "-h", "--version", "-v",
 ]);
 for (const arg of process.argv.slice(2)) {
@@ -145,6 +153,12 @@ if (TURN_TARGET === "cloudflare") {
     console.error(`--turn: expected "cloudflare" or a turn:/turns: URL, got "${TURN_TARGET}"`);
     process.exit(1);
 }
+const SIGNAL_ENABLED = process.argv.includes("--signal");
+if (SIGNAL_ENABLED && !PAGE_URL) {
+    console.error("--signal needs a hosted page for viewers (drop --no-page, or set --page)");
+    process.exit(1);
+}
+
 // static credentials resolve once; cloudflare mints on demand in turnServers()
 const TURN_STATIC = /^turns?:/i.test(TURN_TARGET)
     ? [{
@@ -298,6 +312,11 @@ function compressed(key, encoding, data) {
     return out;
 }
 
+async function listDevices() {
+    const devices = await adbClient.getDevices();
+    return devices.map((d) => ({ serial: d.serial, product: d.product, model: d.model }));
+}
+
 const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname.startsWith("/api/")) {
@@ -321,13 +340,8 @@ const httpServer = createServer(async (req, res) => {
     }
     if (url.pathname === "/api/devices") {
         try {
-            const devices = await adbClient.getDevices();
             res.writeHead(200, { "content-type": "application/json" });
-            res.end(JSON.stringify(devices.map((d) => ({
-                serial: d.serial,
-                product: d.product,
-                model: d.model,
-            }))));
+            res.end(JSON.stringify(await listDevices()));
         } catch (e) {
             res.writeHead(500, { "content-type": "application/json" });
             res.end(JSON.stringify({ error: String(e) }));
@@ -400,7 +414,12 @@ const QUALITY_PRESETS = {
 };
 const PRESET_ORDER = ["low", "medium", "high"];
 
-wss.on("connection", async (ws, req) => {
+wss.on("connection", handleSession);
+
+// the whole session speaks through ws.send/on("message")/close/readyState,
+// so anything with that shape can drive it — a real WebSocket, or a
+// SignalSocket riding encrypted MQTT (--signal)
+async function handleSession(ws, req) {
     const reqUrl = new URL(req.url, "http://localhost");
     const serial = reqUrl.searchParams.get("serial");
     const log = (...a) => console.log(`[${serial}]`, ...a);
@@ -773,7 +792,111 @@ wss.on("connection", async (ws, req) => {
         } catch {}
         log("session closed");
     }
-});
+}
+
+// ---- serverless signaling (--signal) --------------------------------------
+// Viewers reach handleSession() through an encrypted MQTT room instead of a
+// WebSocket. Video never rides the brokers: binary sends are dropped, so a
+// session here is WebRTC-only (pair with --turn for hostile NATs).
+
+class SignalSocket extends EventEmitter {
+    OPEN = 1;
+    readyState = 1;
+    #sid; #room; #onGone; #idle = null;
+
+    constructor(sid, room, onGone) {
+        super();
+        this.#sid = sid;
+        this.#room = room;
+        this.#onGone = onGone;
+        this.touch();
+    }
+
+    // a vanished browser sends no FIN through a broker — time sessions out
+    touch() {
+        clearTimeout(this.#idle);
+        this.#idle = setTimeout(() => this.close(), 90_000);
+        this.#idle.unref?.();
+    }
+
+    send(data) {
+        if (this.readyState !== 1 || typeof data !== "string") return;
+        this.#room.send({ sid: this.#sid, ...JSON.parse(data) });
+    }
+
+    close(code) {
+        if (this.readyState !== 1) return;
+        this.readyState = 3;
+        clearTimeout(this.#idle);
+        this.#room.send({ sid: this.#sid, t: "bye", ...(code ? { code } : {}) });
+        this.#onGone();
+    }
+}
+
+async function signalKey() {
+    const file = join(homedir(), ".config", "tango-mirror", "signal-key");
+    try {
+        const key = b64u.decode((await readFile(file, "utf8")).trim());
+        if (key.length === 32) return key; // stable key -> stable link
+    } catch {}
+    const key = new Uint8Array(randomBytes(32));
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, b64u.encode(key), { mode: 0o600 });
+    return key;
+}
+
+async function startSignal() {
+    const key = await signalKey();
+    const brokers = (argValue("--signal-broker") ?? process.env.TANGO_SIGNAL_BROKERS)
+        ?.split(",").map((s) => s.trim()).filter(Boolean) ?? DEFAULT_BROKERS;
+    const room = await SignalRoom.create({
+        key,
+        role: "host",
+        brokers,
+        log: (...a) => console.log("[signal]", ...a),
+        WebSocketImpl: globalThis.WebSocket ?? WsClient,
+    });
+
+    const sessions = new Map(); // sid -> SignalSocket
+    room.onmessage = async (msg) => {
+        const { sid } = msg;
+        if (!sid) return;
+        if (msg.t === "devices") {
+            if (VIEW_NEEDS_TOKEN && !tokenValid(msg.token)) {
+                room.send({ sid, t: "devices", error: "unauthorized" });
+                return;
+            }
+            try {
+                room.send({ sid, t: "devices", devices: await listDevices() });
+            } catch (e) {
+                room.send({ sid, t: "devices", error: String(e) });
+            }
+        } else if (msg.t === "open") {
+            sessions.get(sid)?.close();
+            const sock = new SignalSocket(sid, room, () => sessions.delete(sid));
+            sessions.set(sid, sock);
+            handleSession(sock, {
+                url: `/api/stream?serial=${encodeURIComponent(msg.serial ?? "")}`,
+                headers: { "sec-websocket-protocol": msg.token ? `tango.token.${msg.token}` : "" },
+            });
+        } else if (msg.t === "bye") {
+            sessions.get(sid)?.close();
+        } else {
+            const sock = sessions.get(sid);
+            if (!sock) return;
+            sock.touch();
+            if (msg.t !== "ping") sock.emit("message", Buffer.from(JSON.stringify(msg)), false);
+        }
+    };
+
+    const link = `${PAGE_URL}#k=${b64u.encode(key)}${TOKEN ? `&t=${TOKEN}` : ""}`;
+    console.log(`\nsignaling ready on ${brokers.length} public broker(s) — the link is stable across restarts:`);
+    console.log(`\n  open:  ${link}\n`);
+    printQr(link);
+    if (!TURN_TARGET) {
+        console.log("note: --signal has no WebSocket fallback; add --turn so video also works where P2P fails");
+    }
+}
 
 // tiny adapter: pipe a ReadableStream<string> to a line logger
 import { WritableStream } from "@yume-chan/stream-extra";
@@ -1028,9 +1151,15 @@ httpServer.listen(PORT, () => {
         console.log(`device shell: enabled${VIEW_NEEDS_TOKEN ? "" : " (viewing stays open; shell needs the token)"}`);
     }
     const backend = tunnelBackend();
-    if (!backend) printOpenUrls();
+    if (!backend && !SIGNAL_ENABLED) printOpenUrls();
     if (backend) {
         startTunnel(backend).catch((e) => console.error("tunnel failed:", e));
+    }
+    if (SIGNAL_ENABLED) {
+        startSignal().catch((e) => {
+            console.error(`signal failed: ${e.message}`);
+            console.error(`tango-mirror is still serving on http://localhost:${PORT}\n`);
+        });
     }
 });
 
