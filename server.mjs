@@ -49,7 +49,9 @@ Options:
       --no-qr             don't print the QR code for the public URL
 
       --tunnel [backend]  expose publicly; backend is cloudflared, tunwg,
-                          or omitted to auto-detect (cloudflared preferred)
+                          or omitted to auto-detect (cloudflared preferred).
+                          wush instead pairs two computers P2P: no public
+                          URL, the viewing machine runs wush port-forward
       --tunnel-api <host> tunwg relay server           (default ${DEFAULT_TUNWG_RELAY})
       --tunnel-auth <u:p> basic auth for the tunnel (tunwg only)
 
@@ -63,14 +65,15 @@ Options:
 
 Environment:
   PORT, ADB_HOST, ADB_PORT, TANGO_TOKEN, TANGO_PAGE, TUNWG_API,
-  TUNWG_BIN, CLOUDFLARED_PATH, TURN_URL, TURN_AUTH, CF_TURN_KEY_ID,
-  CF_TURN_API_TOKEN
+  TUNWG_BIN, CLOUDFLARED_PATH, WUSH_BIN, TURN_URL, TURN_AUTH,
+  CF_TURN_KEY_ID, CF_TURN_API_TOKEN
 
 Examples:
   tango-mirror                                   # local only
   tango-mirror --tunnel                          # + public tunnel
   tango-mirror --shell --tunnel                  # + device shell (tokened)
   tango-mirror --tunnel --turn cloudflare        # fallback via Cloudflare TURN
+  tango-mirror --tunnel wush                     # P2P to another computer
   tango-mirror --shell --page https://me.github.io/tango-mirror/
 
 The devices must already be visible to adb (adb connect <ip> / USB).
@@ -801,7 +804,7 @@ function tunnelBackend() {
     const arg = process.argv[i];
     if (arg.includes("=")) return arg.split("=")[1];
     const next = process.argv[i + 1];
-    if (next === "tunwg" || next === "cloudflared") return next;
+    if (next === "tunwg" || next === "cloudflared" || next === "wush") return next;
     return "auto";
 }
 
@@ -855,6 +858,22 @@ const TUNNEL_BACKENDS = {
         args: (port) => ["tunnel", "--url", `http://localhost:${port}`],
         urlPattern: /https:\/\/[a-z0-9-]+\.trycloudflare\.com/,
     },
+    // no public URL: the viewing machine joins a WireGuard overlay instead
+    // (direct P2P, Tailscale's public DERP as fallback) and opens localhost.
+    // ssh/cp are disabled so the printed key only grants port-forwarding.
+    wush: {
+        envVar: "WUSH_BIN",
+        install: "https://github.com/coder/wush/releases",
+        args: () => ["serve", "--disable", "ssh,cp"],
+        urlPattern: /\b[1-9A-HJ-NP-Za-km-z]{50,}\b/, // base58 auth key
+        announce: (key) => {
+            console.log("\nno public URL with wush — run this on the viewing machine instead");
+            console.log("(it needs wush too), then open the link there:\n");
+            console.log(`  wush port-forward --auth-key ${key} --tcp ${PORT}:${PORT}`);
+            printOpenUrls();
+            console.log("the key allows TCP port-forwarding into this machine while this runs — treat it like a password");
+        },
+    },
 };
 
 async function startTunnel(backendName) {
@@ -882,7 +901,7 @@ async function startTunnel(backendName) {
     } else {
         const backend = TUNNEL_BACKENDS[name];
         if (!backend) {
-            console.error(`--tunnel: unknown backend "${name}" (use tunwg or cloudflared)`);
+            console.error(`--tunnel: unknown backend "${name}" (use cloudflared, tunwg or wush)`);
             process.exit(1);
         }
         bin = findBinary(name, backend.envVar);
@@ -911,6 +930,10 @@ async function startTunnel(backendName) {
         if (m) {
             announced = true;
             const url = m[1] ?? m[0];
+            if (backend.announce) {
+                backend.announce(url);
+                return;
+            }
             printOpenUrls(url);
             if (name === "cloudflared" && !VIEW_NEEDS_TOKEN) {
                 console.log("note: this URL is public and unauthenticated — share carefully");

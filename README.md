@@ -55,6 +55,21 @@ npx tango-mirror --tunnel
 Scan the QR code or open the printed link. The tunnel gives you a public
 HTTPS address; no router or firewall changes needed.
 
+**Between two computers, no relay at all**
+
+Install [wush](https://github.com/coder/wush/releases) on both machines,
+then:
+
+```bash
+npx tango-mirror --tunnel wush
+```
+
+Run the printed `wush port-forward …` command on the viewing machine and
+open the printed localhost link there. Traffic is WireGuard end to end —
+direct P2P when hole-punching works, Tailscale's public DERP servers as
+fallback. No accounts, no relay of yours, but the viewer needs wush, so
+this one is for laptops rather than phones.
+
 **With a shell on the device**
 
 ```bash
@@ -89,7 +104,7 @@ Run `tango-mirror --help` for the same list.
 | `--adb-port` | `ADB_PORT` | `5037` | adb server port |
 | `--shell` | — | off | enable the device shell (needs a token; generated if absent) |
 | `--token` | `TANGO_TOKEN` | off | require this token for *everything*, viewing included |
-| `--tunnel [backend]` | — | off | expose publicly; `cloudflared`, `tunwg`, or auto (prefers cloudflared) |
+| `--tunnel [backend]` | — | off | expose publicly; `cloudflared`, `tunwg`, `wush`, or auto (prefers cloudflared) |
 | `--tunnel-api` | `TUNWG_API` | `relay.hapi.run` | tunwg relay server |
 | `--tunnel-auth` | — | off | basic auth `user:pass` (tunwg only) |
 | `--turn <target>` | `TURN_URL` | off | TURN relay for failed P2P: `cloudflare` or a `turn:`/`turns:` URL |
@@ -100,6 +115,7 @@ Run `tango-mirror --help` for the same list.
 | `--no-qr` | — | off | don't print the QR code |
 | — | `TUNWG_BIN` | auto-detect | tunwg binary location |
 | — | `CLOUDFLARED_PATH` | auto-detect | cloudflared binary location |
+| — | `WUSH_BIN` | auto-detect | wush binary location |
 
 The UI follows your browser language (中文/English); `?lang=en` or `?lang=zh`
 overrides it.
@@ -179,6 +195,13 @@ Bare `--tunnel` picks cloudflared when both are installed.
   can't see your traffic). Traffic flows through a tunwg relay —
   `relay.hapi.run` by default; use `--tunnel-api` for your own. If a relay
   issues keys, one is fetched and cached under `~/.config/tango-mirror/`.
+- **[wush](https://github.com/coder/wush)** — for viewing from another
+  computer: instead of a public URL, the viewing machine joins a WireGuard
+  overlay (`wush port-forward`) and opens localhost. Direct P2P when
+  possible, Tailscale's public DERP as fallback; end-to-end encrypted, no
+  accounts, nothing hosted. tango-mirror runs `wush serve` with ssh/cp
+  disabled, so the printed key only grants port-forwarding — still, treat
+  it like a password while the server runs.
 
 ### TURN: keeping the fallback off your relay
 
