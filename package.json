@@ -8,6 +8,7 @@
   },
   "files": [
     "server.mjs",
+    "webrtc.mjs",
     "public/",
     "server.bin",
     "scrcpy-server.LICENSE"
@@ -27,7 +28,16 @@
     "tango",
     "webcodecs"
   ],
+  "author": "weishu <twsxtd@gmail.com>",
   "license": "MIT",
+  "homepage": "https://github.com/tiann/tango-mirror#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tiann/tango-mirror.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tiann/tango-mirror/issues"
+  },
   "engines": {
     "node": ">=20"
   },
