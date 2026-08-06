@@ -295,6 +295,7 @@ function connect(serial) {
             const msg = JSON.parse(ev.data);
             if (msg.type === "meta") {
                 startDecoder(msg.codec);
+                $("btn-shell").hidden = !msg.shell;
                 if (msg.preset) qualitySelect.value = msg.auto ? "auto" : msg.preset;
                 if (path !== "rtc") setBadge("WS");
             } else if (msg.type === "quality") {
@@ -512,6 +513,8 @@ function sendShell(obj) {
 function openShell() {
     if (!currentSerial) return;
     shellPanel.hidden = false;
+    // shrink the stage instead of covering it, so the screen stays visible
+    $("stage-wrap").classList.add("with-shell");
     if (!term) {
         term = new Terminal({
             fontSize: 13,
@@ -523,7 +526,10 @@ function openShell() {
         term.open($("terminal"));
         term.onData((d) => sendShell({ t: "shell-in", d }));
         term.onResize(({ rows, cols }) => sendShell({ t: "shell-resize", rows, cols }));
-        new ResizeObserver(() => fitAddon?.fit()).observe($("terminal"));
+        // panel geometry changes on rotation / window resize
+        new ResizeObserver(() => {
+            if (!shellPanel.hidden) fitAddon?.fit();
+        }).observe($("terminal"));
     }
     fitAddon.fit();
     term.focus();
@@ -534,7 +540,7 @@ function openShell() {
 
 function closeShell() {
     shellPanel.hidden = true;
-    videoEl?.focus?.();
+    $("stage-wrap").classList.remove("with-shell");
 }
 
 function handleShellMessage(msg) {

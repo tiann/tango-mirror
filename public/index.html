@@ -122,19 +122,34 @@
         touch-action: none;
     }
 
-    /* ── shell panel (overlays the lower stage) ── */
+    /* ── shell panel ───────────────────────────── */
+    /* narrow/portrait: docked at the bottom. wide/landscape: docked to the
+       right, where a portrait device screen leaves the space unused */
+    #stage-wrap.with-shell #stage { margin-bottom: 55%; }
     #shell-panel {
         position: absolute;
         left: 0;
         right: 0;
         bottom: 0;
-        height: 60%;
+        height: 55%;
         z-index: 6;
         display: flex;
         flex-direction: column;
         background: #0f1115;
         border-top: 1px solid #2a2f3a;
         box-shadow: 0 -8px 24px rgba(0, 0, 0, .5);
+    }
+    @media (min-aspect-ratio: 1/1) and (min-width: 640px) {
+        #stage-wrap.with-shell #stage { margin-bottom: 0; margin-right: 50%; }
+        #shell-panel {
+            left: auto;
+            top: 0;
+            width: 50%;
+            height: auto;
+            border-top: none;
+            border-left: 1px solid #2a2f3a;
+            box-shadow: -8px 0 24px rgba(0, 0, 0, .5);
+        }
     }
     #shell-panel[hidden] { display: none; }
     #shell-head {
@@ -239,7 +254,7 @@
     <button id="btn-home" title="主页">◯</button>
     <button id="btn-recents" title="最近任务">▢</button>
     <button id="btn-kbd" class="accent" title="键盘">⌨</button>
-    <button id="btn-shell" class="accent" title="Shell">&gt;_</button>
+    <button id="btn-shell" class="accent" title="Shell" hidden>&gt;_</button>
 </nav>
 <script src="./app.js"></script>
 </body>

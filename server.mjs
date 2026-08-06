@@ -32,11 +32,12 @@ const PKG_DIR = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(PKG_DIR, "public");
 
 const SHELL_ENABLED = process.argv.includes("--shell");
-let TOKEN = argValue("--token") ?? process.env.TANGO_TOKEN ?? "";
-if (SHELL_ENABLED && !TOKEN) {
-    // never expose a shell without auth — generate one rather than fail open
-    TOKEN = randomBytes(16).toString("hex");
-}
+const EXPLICIT_TOKEN = argValue("--token") ?? process.env.TANGO_TOKEN ?? "";
+// an explicit token locks everything down; --shell alone only gates the
+// shell, so mirroring stays as frictionless as before
+const TOKEN = EXPLICIT_TOKEN || (SHELL_ENABLED ? randomBytes(16).toString("hex") : "");
+const VIEW_NEEDS_TOKEN = Boolean(EXPLICIT_TOKEN);
+const PAGE_URL = argValue("--page") ?? process.env.TANGO_PAGE ?? "";
 
 const TOKEN_PROTOCOL = "tango.token.";
 
@@ -86,7 +87,7 @@ const httpServer = createServer(async (req, res) => {
         const given = header?.startsWith("Bearer ")
             ? header.slice(7)
             : url.searchParams.get("token") ?? undefined;
-        if (!tokenValid(given)) {
+        if (VIEW_NEEDS_TOKEN && !tokenValid(given)) {
             res.writeHead(401, { "content-type": "application/json" });
             res.end(JSON.stringify({ error: "unauthorized" }));
             return;
@@ -158,7 +159,8 @@ wss.on("connection", async (ws, req) => {
     const given = offered
         ? offered.slice(TOKEN_PROTOCOL.length)
         : reqUrl.searchParams.get("token") ?? undefined;
-    if (!tokenValid(given)) {
+    const authed = tokenValid(given);
+    if (VIEW_NEEDS_TOKEN && !authed) {
         log("rejected: bad token");
         ws.close(4001, "unauthorized");
         return;
@@ -201,6 +203,11 @@ wss.on("connection", async (ws, req) => {
         if (msg.t === "shell-start") {
             if (!SHELL_ENABLED) {
                 sendShell({ t: "shell-error", message: "shell disabled (start server with --shell)" });
+                return;
+            }
+            // the shell always needs the token, even when viewing doesn't
+            if (!authed) {
+                sendShell({ t: "shell-error", message: "unauthorized: open the page with ?token=…" });
                 return;
             }
             closePty();
@@ -415,6 +422,7 @@ wss.on("connection", async (ws, req) => {
                 serverVersion: VERSION,
                 preset,
                 auto: autoQuality,
+                shell: SHELL_ENABLED && authed,
             });
             video.sizeChanged((size) => sendSignal({ type: "size", ...size }));
 
@@ -627,8 +635,9 @@ async function startTunnel(backendName) {
         const m = String(chunk).match(backend.urlPattern);
         if (m) {
             announced = true;
-            console.log(`public URL: ${m[1] ?? m[0]}`);
-            if (name === "cloudflared") {
+            const url = m[1] ?? m[0];
+            printOpenUrls(url);
+            if (name === "cloudflared" && !VIEW_NEEDS_TOKEN) {
                 console.log("note: this URL is public and unauthenticated — share carefully");
             }
         }
@@ -649,14 +658,27 @@ async function startTunnel(backendName) {
     process.on("SIGTERM", cleanup);
 }
 
+// print ready-to-click URLs: the token is already embedded, so opening one
+// is all the setup there is (the page saves it and strips it from the bar)
+function printOpenUrls(publicUrl) {
+    const q = TOKEN ? `?token=${TOKEN}` : "";
+    console.log(`\n  open:  http://localhost:${PORT}/${q}`);
+    if (publicUrl) console.log(`         ${publicUrl}/${q}`);
+    if (PAGE_URL && publicUrl) {
+        const host = publicUrl.replace(/^https?:\/\//, "");
+        const sep = PAGE_URL.includes("?") ? "&" : "?";
+        console.log(`         ${PAGE_URL}${sep}server=${host}${TOKEN ? `&token=${TOKEN}` : ""}`);
+    }
+    console.log("");
+}
+
 httpServer.listen(PORT, () => {
     console.log(`tango-mirror listening on http://localhost:${PORT} (scrcpy server v${VERSION})`);
-    if (SHELL_ENABLED) console.log("device shell: enabled");
-    if (TOKEN) {
-        console.log(`auth token: ${TOKEN}`);
-        console.log(`append to the page URL: ?token=${TOKEN}`);
+    if (SHELL_ENABLED) {
+        console.log(`device shell: enabled${VIEW_NEEDS_TOKEN ? "" : " (viewing stays open; shell needs the token)"}`);
     }
     const backend = tunnelBackend();
+    if (!backend) printOpenUrls();
     if (backend) {
         startTunnel(backend).catch((e) => console.error("tunnel failed:", e));
     }

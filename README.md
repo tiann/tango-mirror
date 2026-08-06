@@ -45,8 +45,9 @@ override with `?lang=en` / `?lang=zh` (remembered afterwards).
 | `--port`, `-p` | `PORT` | `8010` | HTTP/WebSocket listen port |
 | `--adb-host` | `ADB_HOST` | `127.0.0.1` | adb server host |
 | `--adb-port` | `ADB_PORT` | `5037` | adb server port |
-| `--token` | `TANGO_TOKEN` | off | require this token on every API/WebSocket call |
-| `--shell` | — | off | enable the device shell (forces a token; one is generated if absent) |
+| `--token` | `TANGO_TOKEN` | off | require this token for *everything*, including viewing |
+| `--shell` | — | off | enable the device shell (gated by a token; generated if absent) |
+| `--page` | `TANGO_PAGE` | — | static page URL to print a ready-to-open link for |
 | `--tunnel [backend]` | — | off | expose publicly; backend `tunwg`, `cloudflared`, or auto |
 | `--tunnel-api` | `TUNWG_API` | `l.tunwg.com` | tunwg relay server |
 | `--tunnel-auth` | — | off | basic auth `user:pass` (tunwg only) |
@@ -104,12 +105,21 @@ Ctrl-C all work, and the terminal size is synced. It rides a dedicated
 WebRTC DataChannel so output bursts (`logcat`) can't delay touch input,
 falling back to the WebSocket when P2P is unavailable.
 
-Because a shell is full control of the device, `--shell` refuses to run
-unauthenticated: pass `--token`, or one is generated and printed at
-startup. Open the page with `?token=…` once (it is saved and scrubbed
-from the URL). The token travels in a WebSocket subprotocol and an
-`Authorization` header, never in a URL; with tunwg the relay cannot see
-it, since the tunnel is end-to-end encrypted.
+Because a shell is full control of the device, it always requires a
+token — one is generated if you don't pass `--token`. Auth is tiered:
+`--shell` alone gates *only* the shell (mirroring stays open, as
+before), while an explicit `--token` locks down everything including
+viewing.
+
+On startup the server prints ready-to-open URLs with the token already
+embedded — click one and you're in; the page saves the token and strips
+it from the address bar. `--page https://you.github.io/tango-mirror/`
+adds a link for a statically hosted frontend, pre-filled with both the
+backend address and the token.
+
+The token travels in a WebSocket subprotocol and an `Authorization`
+header, never in a URL query; with tunwg the relay cannot see it, since
+the tunnel is end-to-end encrypted.
 
 ### Clipboard sync
 
