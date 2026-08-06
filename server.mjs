@@ -23,6 +23,8 @@ function argValue(...names) {
     return undefined;
 }
 
+const DEFAULT_PAGE = "https://weishu.me/tango-mirror/";
+
 const HELP = `tango-mirror — view and control Android devices from a browser
 
 Usage: tango-mirror [options]
@@ -35,8 +37,9 @@ Options:
       --shell             enable the device shell; requires a token, one is
                           generated if --token is absent (mirroring stays open)
       --token <value>     require this token for everything, viewing included
-      --page <url>        also print an open-link for a statically hosted
-                          frontend, pre-filled with backend address and token
+      --page <url>        frontend to redirect remote visitors to
+                          (default ${DEFAULT_PAGE})
+      --no-page           serve the bundled page instead of redirecting
 
       --tunnel [backend]  expose publicly; backend is tunwg, cloudflared,
                           or omitted to auto-detect (tunwg preferred)
@@ -74,7 +77,8 @@ if (process.argv.includes("--version") || process.argv.includes("-v")) {
 // catch typo'd flags instead of silently ignoring them
 const KNOWN_FLAGS = new Set([
     "--port", "-p", "--adb-host", "--adb-port", "--shell", "--token", "--page",
-    "--tunnel", "--tunnel-api", "--tunnel-auth", "--help", "-h", "--version", "-v",
+    "--tunnel", "--tunnel-api", "--tunnel-auth", "--no-page",
+    "--help", "-h", "--version", "-v",
 ]);
 for (const arg of process.argv.slice(2)) {
     if (arg.startsWith("-") && !KNOWN_FLAGS.has(arg.split("=")[0])) {
@@ -97,7 +101,18 @@ const EXPLICIT_TOKEN = argValue("--token") ?? process.env.TANGO_TOKEN ?? "";
 // shell, so mirroring stays as frictionless as before
 const TOKEN = EXPLICIT_TOKEN || (SHELL_ENABLED ? randomBytes(16).toString("hex") : "");
 const VIEW_NEEDS_TOKEN = Boolean(EXPLICIT_TOKEN);
-const PAGE_URL = argValue("--page") ?? process.env.TANGO_PAGE ?? "";
+// remote requests are redirected to DEFAULT_PAGE so the page assets come
+// from a CDN instead of eating tunnel bandwidth
+const PAGE_URL = process.argv.includes("--no-page")
+    ? ""
+    : argValue("--page") ?? process.env.TANGO_PAGE ?? DEFAULT_PAGE;
+
+const LOCAL_HOST = /^(localhost|127\.\d+\.\d+\.\d+|\[?::1\]?|0\.0\.0\.0|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/;
+
+function isLocalRequest(req) {
+    const host = (req.headers.host ?? "").replace(/:\d+$/, "");
+    return LOCAL_HOST.test(host);
+}
 
 const TOKEN_PROTOCOL = "tango.token.";
 
@@ -166,6 +181,17 @@ const httpServer = createServer(async (req, res) => {
             res.writeHead(500, { "content-type": "application/json" });
             res.end(JSON.stringify({ error: String(e) }));
         }
+        return;
+    }
+    // don't ship the bundle through the tunnel — hand remote visitors to the
+    // CDN-hosted page, carrying over the backend host and any token
+    if (PAGE_URL && !isLocalRequest(req)) {
+        const target = new URL(PAGE_URL);
+        target.searchParams.set("server", req.headers.host ?? "");
+        const token = url.searchParams.get("token");
+        if (token) target.searchParams.set("token", token);
+        res.writeHead(302, { location: target.toString() });
+        res.end();
         return;
     }
     const file = url.pathname === "/" ? "/index.html" : url.pathname;
@@ -722,14 +748,17 @@ async function startTunnel(backendName) {
 // is all the setup there is (the page saves it and strips it from the bar)
 function printOpenUrls(publicUrl) {
     const q = TOKEN ? `?token=${TOKEN}` : "";
-    console.log(`\n  open:  http://localhost:${PORT}/${q}`);
-    if (publicUrl) console.log(`         ${publicUrl}/${q}`);
-    if (PAGE_URL && publicUrl) {
-        const host = publicUrl.replace(/^https?:\/\//, "");
-        const sep = PAGE_URL.includes("?") ? "&" : "?";
-        console.log(`         ${PAGE_URL}${sep}server=${host}${TOKEN ? `&token=${TOKEN}` : ""}`);
+    if (publicUrl && PAGE_URL) {
+        const target = new URL(PAGE_URL);
+        target.searchParams.set("server", publicUrl.replace(/^https?:\/\//, ""));
+        if (TOKEN) target.searchParams.set("token", TOKEN);
+        console.log(`\n  open:  ${target}`);
+        console.log(`         (${publicUrl}/${q} redirects here — the page is`);
+        console.log("          served from the CDN, not through the tunnel)");
+    } else if (publicUrl) {
+        console.log(`\n  open:  ${publicUrl}/${q}`);
     }
-    console.log("");
+    console.log(`${publicUrl ? "  local: " : "\n  open:  "}http://localhost:${PORT}/${q}\n`);
 }
 
 httpServer.listen(PORT, () => {

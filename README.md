@@ -47,7 +47,8 @@ override with `?lang=en` / `?lang=zh` (remembered afterwards).
 | `--adb-port` | `ADB_PORT` | `5037` | adb server port |
 | `--token` | `TANGO_TOKEN` | off | require this token for *everything*, including viewing |
 | `--shell` | — | off | enable the device shell (gated by a token; generated if absent) |
-| `--page` | `TANGO_PAGE` | — | static page URL to print a ready-to-open link for |
+| `--page` | `TANGO_PAGE` | project page | frontend to redirect remote visitors to |
+| `--no-page` | — | off | serve the bundled page instead of redirecting |
 | `--tunnel [backend]` | — | off | expose publicly; backend `tunwg`, `cloudflared`, or auto |
 | `--tunnel-api` | `TUNWG_API` | `l.tunwg.com` | tunwg relay server |
 | `--tunnel-auth` | — | off | basic auth `user:pass` (tunwg only) |
@@ -113,13 +114,20 @@ viewing.
 
 On startup the server prints ready-to-open URLs with the token already
 embedded — click one and you're in; the page saves the token and strips
-it from the address bar. `--page https://you.github.io/tango-mirror/`
-adds a link for a statically hosted frontend, pre-filled with both the
-backend address and the token.
+it from the address bar.
 
 The token travels in a WebSocket subprotocol and an `Authorization`
 header, never in a URL query; with tunwg the relay cannot see it, since
 the tunnel is end-to-end encrypted.
+
+### Page hosting
+
+Requests that arrive with a non-local `Host` (i.e. through a tunnel) are
+redirected to the hosted frontend with `server` and `token` pre-filled,
+so the ~400 KB bundle comes from a CDN and the tunnel only ever carries
+signaling and API calls. Links to the tunnel URL keep working — they
+just bounce. Point `--page` at your own deployment, or use `--no-page`
+to serve the bundled copy directly (offline / LAN-only setups).
 
 ### Clipboard sync
 
