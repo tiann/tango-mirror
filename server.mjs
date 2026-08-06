@@ -13,6 +13,7 @@ import { AdbServerNodeTcpConnector } from "@yume-chan/adb-server-node-tcp";
 import { AdbScrcpyClient, AdbScrcpyOptions3_1 } from "@yume-chan/adb-scrcpy";
 import { ReadableStream } from "@yume-chan/stream-extra";
 import { ScrcpyPointerId, ScrcpyInstanceId, AndroidMotionEventAction } from "@yume-chan/scrcpy";
+import qrcode from "qrcode-terminal";
 import { createRtcSession } from "./webrtc.mjs";
 
 function argValue(...names) {
@@ -43,6 +44,7 @@ Options:
       --page <url>        frontend to redirect remote visitors to
                           (default ${DEFAULT_PAGE})
       --no-page           serve the bundled page instead of redirecting
+      --no-qr             don't print the QR code for the public URL
 
       --tunnel [backend]  expose publicly; backend is tunwg, cloudflared,
                           or omitted to auto-detect (tunwg preferred)
@@ -80,7 +82,7 @@ if (process.argv.includes("--version") || process.argv.includes("-v")) {
 // catch typo'd flags instead of silently ignoring them
 const KNOWN_FLAGS = new Set([
     "--port", "-p", "--adb-host", "--adb-port", "--shell", "--token", "--page",
-    "--tunnel", "--tunnel-api", "--tunnel-auth", "--no-page",
+    "--tunnel", "--tunnel-api", "--tunnel-auth", "--no-page", "--no-qr",
     "--help", "-h", "--version", "-v",
 ]);
 for (const arg of process.argv.slice(2)) {
@@ -817,17 +819,32 @@ async function startTunnel(backendName) {
 
 // print ready-to-click URLs: the token is already embedded, so opening one
 // is all the setup there is (the page saves it and strips it from the bar)
+// a QR beats copying a URL with a 32-char token out of a terminal, which is
+// the usual way this gets opened on a phone
+function printQr(url) {
+    if (process.argv.includes("--no-qr")) return;
+    const width = process.stdout.columns ?? 80;
+    qrcode.generate(url, { small: true }, (art) => {
+        const lines = art.split("\n");
+        if ((lines[0]?.length ?? 0) > width) return; // wrapped QR is unscannable
+        console.log(lines.map((l) => `  ${l}`).join("\n"));
+    });
+}
+
 function printOpenUrls(publicUrl) {
     const q = TOKEN ? `?token=${TOKEN}` : "";
+    let primary = null;
     if (publicUrl && PAGE_URL) {
         const target = new URL(PAGE_URL);
         target.searchParams.set("server", publicUrl.replace(/^https?:\/\//, ""));
         if (TOKEN) target.searchParams.set("token", TOKEN);
-        console.log(`\n  open:  ${target}`);
+        primary = target.toString();
     } else if (publicUrl) {
-        console.log(`\n  open:  ${publicUrl}/${q}`);
+        primary = `${publicUrl}/${q}`;
     }
-    console.log(`${publicUrl ? "  local: " : "\n  open:  "}http://localhost:${PORT}/${q}\n`);
+    if (primary) console.log(`\n  open:  ${primary}`);
+    console.log(`${primary ? "  local: " : "\n  open:  "}http://localhost:${PORT}/${q}\n`);
+    if (primary) printQr(primary);
 }
 
 // ws re-emits http server errors on the WebSocketServer, so both need a

@@ -51,6 +51,7 @@ override with `?lang=en` / `?lang=zh` (remembered afterwards).
 | `--shell` | — | off | enable the device shell (gated by a token; generated if absent) |
 | `--page` | `TANGO_PAGE` | project page | frontend to redirect remote visitors to |
 | `--no-page` | — | off | serve the bundled page instead of redirecting |
+| `--no-qr` | — | off | don't print the QR code for the public URL |
 | `--tunnel [backend]` | — | off | expose publicly; backend `tunwg`, `cloudflared`, or auto |
 | `--tunnel-api` | `TUNWG_API` | `relay.hapi.run` | tunwg relay server |
 | `--tunnel-auth` | — | off | basic auth `user:pass` (tunwg only) |
@@ -116,7 +117,9 @@ viewing.
 
 On startup the server prints ready-to-open URLs with the token already
 embedded — click one and you're in; the page saves the token and strips
-it from the address bar.
+it from the address bar. The public one is also printed as a QR code
+(`--no-qr` to skip), since that link is usually opened on a phone and
+carries a 32-character token.
 
 The token travels in a WebSocket subprotocol and an `Authorization`
 header, never in a URL query; with tunwg the relay cannot see it, since
