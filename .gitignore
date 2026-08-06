@@ -3,6 +3,6 @@ node_modules/
 # generated at prepack
 server.bin
 scrcpy-server.LICENSE
-public/app.js
+public/*.js
 *.swp
 *.swo

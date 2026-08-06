@@ -1,6 +1,6 @@
 {
   "name": "tango-mirror",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "View and control WiFi-connected Android devices from a browser. Self-hosted scrcpy over WebRTC P2P built on ya-webadb (Tango): video, audio, clipboard sync and an optional device shell.",
   "type": "module",
   "bin": {
@@ -14,7 +14,8 @@
     "scrcpy-server.LICENSE"
   ],
   "scripts": {
-    "build": "esbuild src/client.js --bundle --format=iife --outfile=public/app.js --minify --loader:.css=text",
+    "prebuild": "rm -f public/*.js",
+    "build": "esbuild src/client.js --bundle --format=esm --splitting --outdir=public --entry-names=app --minify --loader:.css=text",
     "fetch-server": "fetch-scrcpy-server 3.1",
     "prepack": "npm run build && cp node_modules/@yume-chan/fetch-scrcpy-server/server.bin server.bin && cp node_modules/@yume-chan/fetch-scrcpy-server/scrcpy.LICENSE scrcpy-server.LICENSE",
     "start": "node server.mjs"

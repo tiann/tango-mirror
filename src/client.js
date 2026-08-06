@@ -3,11 +3,23 @@ import {
     WebGLVideoFrameRenderer,
     BitmapVideoFrameRenderer,
 } from "@yume-chan/scrcpy-decoder-webcodecs";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import xtermCss from "@xterm/xterm/css/xterm.css";
+// xterm is ~300 KB of the bundle and only matters once the shell is opened,
+// so it loads on demand
+let Terminal = null;
+let FitAddon = null;
 
-document.head.appendChild(document.createElement("style")).textContent = xtermCss;
+async function loadXterm() {
+    if (Terminal) return;
+    const [xterm, fit, css] = await Promise.all([
+        import("@xterm/xterm"),
+        import("@xterm/addon-fit"),
+        import("@xterm/xterm/css/xterm.css"),
+    ]);
+    Terminal = xterm.Terminal;
+    FitAddon = fit.FitAddon;
+    document.head.appendChild(document.createElement("style")).textContent =
+        css.default ?? css;
+}
 
 const ICE_SERVERS = [
     { urls: "stun:stun.cloudflare.com:3478" },
@@ -510,11 +522,17 @@ function sendShell(obj) {
     else sendWs(obj);
 }
 
-function openShell() {
+async function openShell() {
     if (!currentSerial) return;
     shellPanel.hidden = false;
     // shrink the layout instead of covering it, so the screen stays visible
     document.body.classList.add("with-shell");
+    try {
+        await loadXterm();
+    } catch (e) {
+        $("shell-title").textContent = `${t.shell}: ${e.message}`;
+        return;
+    }
     if (!term) {
         term = new Terminal({
             fontSize: 13,
@@ -610,7 +628,10 @@ $("btn-fullscreen").onclick = () => {
 };
 
 $("btn-settings").onclick = promptBackend;
-$("btn-shell").onclick = () => (shellPanel.hidden ? openShell() : closeShell());
+$("btn-shell").onclick = () => {
+    if (shellPanel.hidden) openShell().catch((e) => console.error("shell:", e));
+    else closeShell();
+};
 $("shell-close").onclick = closeShell;
 
 deviceSelect.onchange = () => {
