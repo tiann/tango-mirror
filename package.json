@@ -1,7 +1,7 @@
 {
   "name": "tango-mirror",
-  "version": "0.1.0",
-  "description": "View and control WiFi-connected Android devices from a browser. Minimal self-hosted scrcpy-over-WebSocket server built on ya-webadb (Tango), scrcpy server v3.1.",
+  "version": "0.3.0",
+  "description": "View and control WiFi-connected Android devices from a browser. Self-hosted scrcpy over WebRTC P2P built on ya-webadb (Tango): video, audio, clipboard sync and an optional device shell.",
   "type": "module",
   "bin": {
     "tango-mirror": "server.mjs"

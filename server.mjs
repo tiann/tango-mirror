@@ -23,6 +23,66 @@ function argValue(...names) {
     return undefined;
 }
 
+const HELP = `tango-mirror — view and control Android devices from a browser
+
+Usage: tango-mirror [options]
+
+Options:
+  -p, --port <n>          HTTP/WebSocket listen port            (default 8010)
+      --adb-host <host>   adb server host                  (default 127.0.0.1)
+      --adb-port <n>      adb server port                       (default 5037)
+
+      --shell             enable the device shell; requires a token, one is
+                          generated if --token is absent (mirroring stays open)
+      --token <value>     require this token for everything, viewing included
+      --page <url>        also print an open-link for a statically hosted
+                          frontend, pre-filled with backend address and token
+
+      --tunnel [backend]  expose publicly; backend is tunwg, cloudflared,
+                          or omitted to auto-detect (tunwg preferred)
+      --tunnel-api <host> tunwg relay server              (default l.tunwg.com)
+      --tunnel-auth <u:p> basic auth for the tunnel (tunwg only)
+
+  -h, --help              show this help
+  -v, --version           show version
+
+Environment:
+  PORT, ADB_HOST, ADB_PORT, TANGO_TOKEN, TANGO_PAGE, TUNWG_API,
+  TUNWG_BIN, CLOUDFLARED_PATH
+
+Examples:
+  tango-mirror                                   # local only
+  tango-mirror --tunnel                          # + public tunnel
+  tango-mirror --shell --tunnel                  # + device shell (tokened)
+  tango-mirror --shell --page https://me.github.io/tango-mirror/
+
+The devices must already be visible to adb (adb connect <ip> / USB).
+Docs: https://github.com/tiann/tango-mirror`;
+
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+    console.log(HELP);
+    process.exit(0);
+}
+if (process.argv.includes("--version") || process.argv.includes("-v")) {
+    const pkg = JSON.parse(
+        await readFile(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
+    );
+    console.log(pkg.version);
+    process.exit(0);
+}
+
+// catch typo'd flags instead of silently ignoring them
+const KNOWN_FLAGS = new Set([
+    "--port", "-p", "--adb-host", "--adb-port", "--shell", "--token", "--page",
+    "--tunnel", "--tunnel-api", "--tunnel-auth", "--help", "-h", "--version", "-v",
+]);
+for (const arg of process.argv.slice(2)) {
+    if (arg.startsWith("-") && !KNOWN_FLAGS.has(arg.split("=")[0])) {
+        console.error(`unknown option: ${arg}\nrun with --help to see available options`);
+        process.exit(1);
+    }
+}
+
 const PORT = Number(argValue("--port", "-p") ?? process.env.PORT ?? 8010);
 const ADB_HOST = argValue("--adb-host") ?? process.env.ADB_HOST ?? "127.0.0.1";
 const ADB_PORT = Number(argValue("--adb-port") ?? process.env.ADB_PORT ?? 5037);
