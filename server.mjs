@@ -62,9 +62,11 @@ Options:
                           turn:/turns: URL used with --turn-auth
       --turn-auth <u:p>   credentials for a --turn turn:/turns: URL
 
-      --signal            serverless mode: no tunnel — the page meets this
-                          host via encrypted messages on public MQTT
-                          brokers; media is WebRTC-only (pair with --turn)
+      --signal            serverless remote access: the page meets this host
+                          via encrypted messages on public MQTT brokers;
+                          media is WebRTC-only (pair with --turn). On by
+                          default — the flag forces it alongside --tunnel
+      --no-signal         strictly local: never touch a broker
       --signal-broker <l> comma-separated wss:// brokers to use instead
 
   -h, --help              show this help
@@ -76,12 +78,12 @@ Environment:
   CF_TURN_KEY_ID, CF_TURN_API_TOKEN, TANGO_SIGNAL_BROKERS
 
 Examples:
-  tango-mirror                                   # local only
-  tango-mirror --tunnel                          # + public tunnel
-  tango-mirror --shell --tunnel                  # + device shell (tokened)
-  tango-mirror --tunnel --turn cloudflare        # fallback via Cloudflare TURN
+  tango-mirror                                   # remote link via signaling + local
+  tango-mirror --turn cloudflare                 # + TURN for where P2P fails
+  tango-mirror --shell                           # + device shell (tokened)
+  tango-mirror --no-signal                       # strictly local
+  tango-mirror --tunnel                          # a tunnel instead of signaling
   tango-mirror --tunnel wush                     # P2P to another computer
-  tango-mirror --signal --turn cloudflare        # no tunnel at all
   tango-mirror --shell --page https://me.github.io/tango-mirror/
 
 The devices must already be visible to adb (adb connect <ip> / USB).
@@ -103,7 +105,7 @@ if (process.argv.includes("--version") || process.argv.includes("-v")) {
 const KNOWN_FLAGS = new Set([
     "--port", "-p", "--adb-host", "--adb-port", "--shell", "--token", "--page",
     "--tunnel", "--tunnel-api", "--tunnel-auth", "--turn", "--turn-auth",
-    "--signal", "--signal-broker", "--no-page", "--no-qr",
+    "--signal", "--no-signal", "--signal-broker", "--no-page", "--no-qr",
     "--help", "-h", "--version", "-v",
 ]);
 for (const arg of process.argv.slice(2)) {
@@ -153,8 +155,14 @@ if (TURN_TARGET === "cloudflare") {
     console.error(`--turn: expected "cloudflare" or a turn:/turns: URL, got "${TURN_TARGET}"`);
     process.exit(1);
 }
-const SIGNAL_ENABLED = process.argv.includes("--signal");
-if (SIGNAL_ENABLED && !PAGE_URL) {
+// serverless signaling is the default remote path — zero cost, zero setup,
+// stable link. It steps aside when a tunnel is asked for, when the page
+// isn't hosted anywhere (--no-page), or on --no-signal; explicit --signal
+// forces it on even alongside a tunnel.
+const SIGNAL_EXPLICIT = process.argv.includes("--signal");
+const SIGNAL_ENABLED = SIGNAL_EXPLICIT ||
+    (!process.argv.includes("--no-signal") && !tunnelBackend() && Boolean(PAGE_URL));
+if (SIGNAL_EXPLICIT && !PAGE_URL) {
     console.error("--signal needs a hosted page for viewers (drop --no-page, or set --page)");
     process.exit(1);
 }
@@ -891,10 +899,14 @@ async function startSignal() {
 
     const link = `${PAGE_URL}#k=${b64u.encode(key)}${TOKEN ? `&t=${TOKEN}` : ""}`;
     console.log(`\nsignaling ready on ${brokers.length} public broker(s) — the link is stable across restarts:`);
-    console.log(`\n  open:  ${link}\n`);
+    console.log(`\n  open:  ${link}`);
+    console.log(`  local: http://localhost:${PORT}/${TOKEN ? `?token=${TOKEN}` : ""}\n`);
     printQr(link);
+    if (!VIEW_NEEDS_TOKEN) {
+        console.log("anyone with this link can view — add --token to require one, --no-signal to stay local");
+    }
     if (!TURN_TARGET) {
-        console.log("note: --signal has no WebSocket fallback; add --turn so video also works where P2P fails");
+        console.log("note: signaling has no WebSocket fallback; add --turn so video also works where P2P fails");
     }
 }
 
@@ -1157,8 +1169,8 @@ httpServer.listen(PORT, () => {
     }
     if (SIGNAL_ENABLED) {
         startSignal().catch((e) => {
-            console.error(`signal failed: ${e.message}`);
-            console.error(`tango-mirror is still serving on http://localhost:${PORT}\n`);
+            console.error(`serverless signaling unavailable (${e.message})`);
+            console.error(`local access still works: http://localhost:${PORT}\n`);
         });
     }
 });

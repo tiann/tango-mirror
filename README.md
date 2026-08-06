@@ -7,18 +7,19 @@ See and control your Android devices from any browser — including over the
 internet, without port forwarding.
 
 ```bash
-npx tango-mirror --tunnel
+npx tango-mirror
 ```
 
-That prints a link (and a QR code) you can open anywhere. Video and touch
-travel peer-to-peer, so the tunnel only carries a few KB of signaling.
+That prints a link (and a QR code) you can open anywhere. No tunnel, no
+account, nothing hosted: the page finds your machine through encrypted
+messages on public brokers, and video and touch travel peer-to-peer.
 
 ## What you get
 
 - **Any browser, any device** — no app to install; open the page on a phone,
   laptop, or tablet
-- **Real remote access** — a tunnel gets you in from outside your network, and
-  WebRTC then connects browser⇆host directly for low latency
+- **Real remote access** — a stable link gets you in from outside your
+  network, and WebRTC connects browser⇆host directly for low latency
 - **Screen + audio + touch** — hardware H.264 and Opus straight from the
   device, no transcoding
 - **Clipboard sync** in both directions
@@ -38,32 +39,31 @@ travel peer-to-peer, so the tunnel only carries a few KB of signaling.
 
 ## Getting started
 
-**Just on this machine**
+**From anywhere (phone, another network)**
 
 ```bash
 npx tango-mirror
 ```
 
-Open the printed `http://localhost:8010/` link.
+Scan the QR code or open the printed link — it stays the same across
+restarts, and no router or firewall changes are needed. For viewers on
+hostile networks (symmetric NAT, CGNAT), add a TURN relay:
+`--turn cloudflare`. See [Serverless signaling](#serverless-signaling)
+for how the link works.
 
-**From anywhere (phone, another network)**
+**Just on this machine**
+
+Open the printed `http://localhost:8010/` link — or pass `--no-signal`
+to stay strictly local, with nothing leaving the machine.
+
+**Through a tunnel instead**
 
 ```bash
 npx tango-mirror --tunnel
 ```
 
-Scan the QR code or open the printed link. The tunnel gives you a public
-HTTPS address; no router or firewall changes needed.
-
-**From anywhere, without any tunnel**
-
-```bash
-npx tango-mirror --signal --turn cloudflare
-```
-
-No tunnel process, nothing hosted, and the printed link never changes: the
-page meets your host through encrypted messages on public MQTT brokers, and
-everything else is WebRTC. See [Serverless signaling](#serverless-signaling).
+A tunnel gives you a public HTTPS address and, unlike signaling, a
+WebSocket fallback that shows video even where WebRTC is blocked outright.
 
 **Between two computers, no relay at all**
 
@@ -98,7 +98,7 @@ the token that's printed at startup — it's already embedded in the links.
 | Save bandwidth on a slow link | Pick 流畅/Smooth in the quality selector (or leave it on Auto) |
 | Hear the device | Click 🔇 (audio only flows in P2P mode) |
 | Use a different port | `--port 9000` |
-| Keep the same URL across restarts | `--tunnel tunwg` — its URL is derived from a local key and stays stable |
+| Keep the same URL across restarts | The default signaling link already is; among tunnels, `--tunnel tunwg` gives one too |
 | Keep video off the tunnel when P2P fails | Add a TURN relay, e.g. `--turn cloudflare` — see [TURN](#turn-keeping-the-fallback-off-your-relay) |
 | Lock down viewing too, not just the shell | `--token yoursecret` |
 | Run without any external site | `--no-page` (serves the UI itself) |
@@ -119,7 +119,8 @@ Run `tango-mirror --help` for the same list.
 | `--tunnel-auth` | — | off | basic auth `user:pass` (tunwg only) |
 | `--turn <target>` | `TURN_URL` | off | TURN relay for failed P2P: `cloudflare` or a `turn:`/`turns:` URL |
 | `--turn-auth` | `TURN_AUTH` | — | `user:pass` for a `--turn` URL |
-| `--signal` | — | off | tunnel-free mode: signaling via public MQTT brokers, media via WebRTC |
+| `--signal` | — | on unless `--tunnel`/`--no-page` | remote access via public MQTT brokers + WebRTC; the flag forces it on |
+| `--no-signal` | — | — | strictly local: never touch a broker |
 | `--signal-broker` | `TANGO_SIGNAL_BROKERS` | 3 public brokers | comma-separated `wss://` broker list |
 | — | `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN` | — | Cloudflare TURN key, used by `--turn cloudflare` |
 | `--page` | `TANGO_PAGE` | project page | frontend to point remote visitors at |
@@ -242,10 +243,12 @@ relays (Open Relay and friends) are dead.
 ### Serverless signaling
 
 In P2P mode a tunnel does two small jobs: give the browser a URL, and carry
-a few KB of SDP/ICE. `--signal` does both without any tunnel:
+a few KB of SDP/ICE. Signaling does both without any tunnel, and it is the
+default mode — plain `tango-mirror` runs it, `--no-signal` turns it off,
+and asking for a `--tunnel` replaces it (explicit `--signal` keeps both):
 
 ```bash
-tango-mirror --signal --turn cloudflare
+tango-mirror --turn cloudflare
 ```
 
 The printed link is `<page>#k=<key>`. The key is generated locally and kept
