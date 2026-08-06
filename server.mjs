@@ -802,6 +802,24 @@ function printOpenUrls(publicUrl) {
     console.log(`${publicUrl ? "  local: " : "\n  open:  "}http://localhost:${PORT}/${q}\n`);
 }
 
+// ws re-emits http server errors on the WebSocketServer, so both need a
+// listener or listen failures surface as an unhandled 'error' event
+const handleListenError = (e) => {
+    if (e.code === "EADDRINUSE") {
+        console.error(
+            `port ${PORT} is already in use — another tango-mirror may be running.\n` +
+            `pick a different one with --port, e.g. tango-mirror --port ${PORT + 1}`,
+        );
+    } else if (e.code === "EACCES") {
+        console.error(`not allowed to listen on port ${PORT}; try a port above 1024`);
+    } else {
+        console.error(`failed to listen on port ${PORT}: ${e.message}`);
+    }
+    process.exit(1);
+};
+httpServer.on("error", handleListenError);
+wss.on("error", handleListenError);
+
 httpServer.listen(PORT, () => {
     console.log(`tango-mirror listening on http://localhost:${PORT} (scrcpy server v${VERSION})`);
     if (SHELL_ENABLED) {
