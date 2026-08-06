@@ -73,7 +73,7 @@ the token that's printed at startup — it's already embedded in the links.
 | Save bandwidth on a slow link | Pick 流畅/Smooth in the quality selector (or leave it on Auto) |
 | Hear the device | Click 🔇 (audio only flows in P2P mode) |
 | Use a different port | `--port 9000` |
-| Keep the same URL across restarts | Use the tunwg backend — its URL is derived from a local key and stays stable |
+| Keep the same URL across restarts | `--tunnel tunwg` — its URL is derived from a local key and stays stable |
 | Keep video off the tunnel when P2P fails | Add a TURN relay, e.g. `--turn cloudflare` — see [TURN](#turn-keeping-the-fallback-off-your-relay) |
 | Lock down viewing too, not just the shell | `--token yoursecret` |
 | Run without any external site | `--no-page` (serves the UI itself) |
@@ -89,7 +89,7 @@ Run `tango-mirror --help` for the same list.
 | `--adb-port` | `ADB_PORT` | `5037` | adb server port |
 | `--shell` | — | off | enable the device shell (needs a token; generated if absent) |
 | `--token` | `TANGO_TOKEN` | off | require this token for *everything*, viewing included |
-| `--tunnel [backend]` | — | off | expose publicly; `tunwg`, `cloudflared`, or auto |
+| `--tunnel [backend]` | — | off | expose publicly; `cloudflared`, `tunwg`, or auto (prefers cloudflared) |
 | `--tunnel-api` | `TUNWG_API` | `relay.hapi.run` | tunwg relay server |
 | `--tunnel-auth` | — | off | basic auth `user:pass` (tunwg only) |
 | `--turn <target>` | `TURN_URL` | off | TURN relay for failed P2P: `cloudflare` or a `turn:`/`turns:` URL |
@@ -168,13 +168,17 @@ and it only routes TLS bytes by SNI.
 
 ### Tunnel backends
 
-- **[tunwg](https://github.com/tiann/tunwg)** (preferred) — end-to-end
-  encrypted, and the URL stays the same across restarts. Defaults to the
-  `relay.hapi.run` relay; use `--tunnel-api` for your own. If a relay issues
-  keys, one is fetched and cached under `~/.config/tango-mirror/`.
-- **[cloudflared](https://github.com/cloudflare/cloudflared/releases)** —
-  zero setup, but the URL is random per run and TLS terminates at
-  Cloudflare's edge, so they can see the traffic.
+Bare `--tunnel` picks cloudflared when both are installed.
+
+- **[cloudflared](https://github.com/cloudflare/cloudflared/releases)**
+  (default) — zero setup, nothing to host and no traffic bill: Cloudflare's
+  free quick tunnels carry everything. In exchange the URL is random per
+  run and TLS terminates at Cloudflare's edge, so they can see the traffic.
+- **[tunwg](https://github.com/tiann/tunwg)** — pick it for a URL that
+  stays the same across restarts and for end-to-end encryption (the relay
+  can't see your traffic). Traffic flows through a tunwg relay —
+  `relay.hapi.run` by default; use `--tunnel-api` for your own. If a relay
+  issues keys, one is fetched and cached under `~/.config/tango-mirror/`.
 
 ### TURN: keeping the fallback off your relay
 

@@ -48,8 +48,8 @@ Options:
       --no-page           serve the bundled page instead of redirecting
       --no-qr             don't print the QR code for the public URL
 
-      --tunnel [backend]  expose publicly; backend is tunwg, cloudflared,
-                          or omitted to auto-detect (tunwg preferred)
+      --tunnel [backend]  expose publicly; backend is cloudflared, tunwg,
+                          or omitted to auto-detect (cloudflared preferred)
       --tunnel-api <host> tunwg relay server           (default ${DEFAULT_TUNWG_RELAY})
       --tunnel-auth <u:p> basic auth for the tunnel (tunwg only)
 
@@ -861,7 +861,10 @@ async function startTunnel(backendName) {
     let name = backendName;
     let bin;
     if (name === "auto") {
-        for (const candidate of ["tunwg", "cloudflared"]) {
+        // cloudflared first: its quick tunnels cost nobody anything, while
+        // tunwg routes everyone's fallback traffic through a relay someone
+        // pays for — tunwg stays the explicit choice for stable URLs + e2e
+        for (const candidate of ["cloudflared", "tunwg"]) {
             bin = findBinary(candidate, TUNNEL_BACKENDS[candidate].envVar);
             if (bin) {
                 name = candidate;
@@ -870,9 +873,9 @@ async function startTunnel(backendName) {
         }
         if (!bin) {
             console.error(
-                "--tunnel: neither tunwg nor cloudflared found in PATH.\n" +
-                `tunwg (end-to-end encrypted):  ${TUNNEL_BACKENDS.tunwg.install}\n` +
-                `cloudflared:                   ${TUNNEL_BACKENDS.cloudflared.install}`,
+                "--tunnel: neither cloudflared nor tunwg found in PATH.\n" +
+                `cloudflared (zero setup):            ${TUNNEL_BACKENDS.cloudflared.install}\n` +
+                `tunwg (stable URL, e2e encrypted):   ${TUNNEL_BACKENDS.tunwg.install}`,
             );
             process.exit(1);
         }
