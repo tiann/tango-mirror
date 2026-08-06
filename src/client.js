@@ -513,8 +513,8 @@ function sendShell(obj) {
 function openShell() {
     if (!currentSerial) return;
     shellPanel.hidden = false;
-    // shrink the stage instead of covering it, so the screen stays visible
-    $("stage-wrap").classList.add("with-shell");
+    // shrink the layout instead of covering it, so the screen stays visible
+    document.body.classList.add("with-shell");
     if (!term) {
         term = new Terminal({
             fontSize: 13,
@@ -540,7 +540,7 @@ function openShell() {
 
 function closeShell() {
     shellPanel.hidden = true;
-    $("stage-wrap").classList.remove("with-shell");
+    document.body.classList.remove("with-shell");
 }
 
 function handleShellMessage(msg) {
