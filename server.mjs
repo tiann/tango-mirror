@@ -2,6 +2,7 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -205,6 +206,25 @@ const MIME = {
     ".css": "text/css; charset=utf-8",
 };
 
+// the bundle is ~420 KB raw; compress once and keep it (the file set is
+// fixed and tiny, so a plain cache is enough)
+const COMPRESSIBLE = new Set([".html", ".js", ".css", ".svg", ".json"]);
+const compressCache = new Map();
+
+function compressed(key, encoding, data) {
+    const cacheKey = `${key}:${encoding}`;
+    let out = compressCache.get(cacheKey);
+    if (!out) {
+        out = encoding === "br"
+            ? brotliCompressSync(data, {
+                params: { [constants.BROTLI_PARAM_QUALITY]: 9 },
+            })
+            : gzipSync(data, { level: 9 });
+        compressCache.set(cacheKey, out);
+    }
+    return out;
+}
+
 const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname.startsWith("/api/")) {
@@ -258,7 +278,21 @@ const httpServer = createServer(async (req, res) => {
     try {
         const data = await readFile(join(PUBLIC_DIR, file));
         const ext = file.slice(file.lastIndexOf("."));
-        res.writeHead(200, { "content-type": MIME[ext] ?? "application/octet-stream" });
+        const headers = {
+            "content-type": MIME[ext] ?? "application/octet-stream",
+            vary: "accept-encoding",
+        };
+        const accepted = req.headers["accept-encoding"] ?? "";
+        const encoding = COMPRESSIBLE.has(ext) && data.length > 1024
+            ? (/\bbr\b/.test(accepted) ? "br" : /\bgzip\b/.test(accepted) ? "gzip" : null)
+            : null;
+        if (encoding) {
+            const body = compressed(file, encoding, data);
+            res.writeHead(200, { ...headers, "content-encoding": encoding });
+            res.end(body);
+            return;
+        }
+        res.writeHead(200, headers);
         res.end(data);
     } catch {
         res.writeHead(404);
