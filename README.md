@@ -26,8 +26,10 @@ Two tunnel backends are supported:
 - [tunwg](https://github.com/tiann/tunwg) (preferred): **end-to-end encrypted**
   (the relay only routes TLS bytes by SNI — it cannot see your screen), stable
   URL across restarts, optional built-in basic auth via `--tunnel-auth`.
-  If the relay requires issued keys, one is requested from `POST /issue`
-  automatically and cached under `~/.config/tango-mirror/`.
+  Defaults to the `relay.hapi.run` relay (tunwg's own `l.tunwg.com` is
+  unreachable); override with `--tunnel-api`. If a relay requires issued
+  keys, one is requested from `POST /issue` automatically and cached under
+  `~/.config/tango-mirror/`.
 - [cloudflared](https://github.com/cloudflare/cloudflared/releases): zero-config
   quick tunnel; note the URL is random per run, unauthenticated, and TLS
   terminates at Cloudflare's edge (they can see the traffic).
@@ -50,7 +52,7 @@ override with `?lang=en` / `?lang=zh` (remembered afterwards).
 | `--page` | `TANGO_PAGE` | project page | frontend to redirect remote visitors to |
 | `--no-page` | — | off | serve the bundled page instead of redirecting |
 | `--tunnel [backend]` | — | off | expose publicly; backend `tunwg`, `cloudflared`, or auto |
-| `--tunnel-api` | `TUNWG_API` | `l.tunwg.com` | tunwg relay server |
+| `--tunnel-api` | `TUNWG_API` | `relay.hapi.run` | tunwg relay server |
 | `--tunnel-auth` | — | off | basic auth `user:pass` (tunwg only) |
 | — | `TUNWG_BIN` | auto-detect | tunwg binary location |
 | — | `CLOUDFLARED_PATH` | auto-detect | cloudflared binary location |

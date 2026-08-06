@@ -24,6 +24,9 @@ function argValue(...names) {
 }
 
 const DEFAULT_PAGE = "https://weishu.me/tango-mirror/";
+// tunwg's own default relay (l.tunwg.com) is unreachable, so default to a
+// working one; --tunnel-api / TUNWG_API still win
+const DEFAULT_TUNWG_RELAY = "relay.hapi.run";
 
 const HELP = `tango-mirror — view and control Android devices from a browser
 
@@ -43,7 +46,7 @@ Options:
 
       --tunnel [backend]  expose publicly; backend is tunwg, cloudflared,
                           or omitted to auto-detect (tunwg preferred)
-      --tunnel-api <host> tunwg relay server              (default l.tunwg.com)
+      --tunnel-api <host> tunwg relay server           (default ${DEFAULT_TUNWG_RELAY})
       --tunnel-auth <u:p> basic auth for the tunnel (tunwg only)
 
   -h, --help              show this help
@@ -669,6 +672,9 @@ function tunnelBackend() {
     return "auto";
 }
 
+const tunwgRelay = () =>
+    argValue("--tunnel-api") ?? process.env.TUNWG_API ?? DEFAULT_TUNWG_RELAY;
+
 // some tunwg relays require an auth key from POST /issue; fetch once and cache
 async function issueTunwgKey(api) {
     const cacheDir = join(homedir(), ".config", "tango-mirror");
@@ -697,7 +703,7 @@ const TUNNEL_BACKENDS = {
         urlPattern: /url=(https:\/\/\S+)/,
         env: async () => {
             const env = {};
-            const api = argValue("--tunnel-api") ?? process.env.TUNWG_API;
+            const api = tunwgRelay();
             if (api) env.TUNWG_API = api;
             if (api && !process.env.TUNWG_AUTH) {
                 try {
@@ -777,6 +783,11 @@ async function startTunnel(backendName) {
     };
     child.stdout.on("data", scan);
     child.stderr.on("data", scan);
+    // a missing or unrunnable binary must not take the whole server down
+    child.on("error", (e) => {
+        console.error(`\ncannot run ${name} (${bin}): ${e.message}`);
+        console.error(`tango-mirror is still serving on http://localhost:${PORT}\n`);
+    });
     child.on("exit", (code) => {
         if (shuttingDown) return;
         console.error(`\n${name} exited with code ${code}${announced ? "" : " before reporting a URL"}`);
@@ -787,10 +798,10 @@ async function startTunnel(backendName) {
         } else {
             console.error(`(${name} printed nothing; ${bin} may be an old or incompatible build)`);
         }
-        if (name === "tunwg" && !argValue("--tunnel-api") && !process.env.TUNWG_API) {
+        if (name === "tunwg") {
             console.error(
-                "tunwg used its default relay (l.tunwg.com). If that relay is\n" +
-                "unreachable, point it at another one with --tunnel-api <host>.",
+                `relay in use: ${tunwgRelay()} — point --tunnel-api at another one\n` +
+                "if it is unreachable, or run your own (see the tunwg README).",
             );
         }
         console.error(`tango-mirror is still serving on http://localhost:${PORT}\n`);
@@ -813,8 +824,6 @@ function printOpenUrls(publicUrl) {
         target.searchParams.set("server", publicUrl.replace(/^https?:\/\//, ""));
         if (TOKEN) target.searchParams.set("token", TOKEN);
         console.log(`\n  open:  ${target}`);
-        console.log(`         (${publicUrl}/${q} redirects here — the page is`);
-        console.log("          served from the CDN, not through the tunnel)");
     } else if (publicUrl) {
         console.log(`\n  open:  ${publicUrl}/${q}`);
     }
