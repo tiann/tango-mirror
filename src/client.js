@@ -753,6 +753,9 @@ $("btn-fullscreen").onclick = () => {
 };
 
 $("btn-settings").onclick = promptBackend;
+// a #k link needs no backend address — the host is found via signaling,
+// so the ⚙ prompt would only mislead
+$("btn-settings").hidden = SIGNAL;
 $("btn-shell").onclick = () => {
     if (shellPanel.hidden) openShell().catch((e) => console.error("shell:", e));
     else closeShell();
