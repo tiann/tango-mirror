@@ -28,6 +28,7 @@ const DEFAULT_PAGE = "https://weishu.me/tango-mirror/";
 // tunwg's own default relay (l.tunwg.com) is unreachable, so default to a
 // working one; --tunnel-api / TUNWG_API still win
 const DEFAULT_TUNWG_RELAY = "relay.hapi.run";
+const REPO_URL = "https://github.com/tiann/tango-mirror";
 
 const HELP = `tango-mirror — view and control Android devices from a browser
 
@@ -155,18 +156,26 @@ function interstitial(target, zh) {
             lead: "前端页面不通过隧道分发，以免占用隧道带宽（约 400 KB）。点击下面的链接从 CDN 打开，后端地址和 token 已经填好：",
             open: "打开控制台",
             selfHostTitle: "想用自己的前端？",
-            selfHost: "这个页面是纯静态的，可以自行部署（比如你自己的 GitHub Pages），然后用",
-            selfHost2: "指向它；或者用",
-            selfHost3: "让本服务直接提供页面。",
+            selfHostIntro: "前端是两个静态文件（<code>public/index.html</code> 和 <code>public/app.js</code>），托管在任何静态服务上都行：",
+            steps: [
+                "Fork 或 clone 仓库：",
+                "把 <code>public/</code> 部署到 GitHub Pages / Cloudflare Pages / Vercel 等（仓库里的 GitHub Actions 已经配好，push 即自动发布到 gh-pages 分支）",
+                "启动时加 <code>--page https://你的地址/</code> 指向它",
+            ],
+            offline: "如果只在内网或离线使用，用 <code>--no-page</code> 让本服务直接提供页面，不依赖任何外部站点。",
         }
         : {
             title: "Open tango-mirror",
             lead: "The frontend isn't served through the tunnel, to keep ~400 KB of bundle off it. Open it from the CDN below — the backend address and token are already filled in:",
             open: "Open console",
             selfHostTitle: "Prefer your own frontend?",
-            selfHost: "The page is fully static, so you can host it yourself (e.g. your own GitHub Pages) and point",
-            selfHost2: "at it, or use",
-            selfHost3: "to have this server deliver the page directly.",
+            selfHostIntro: "The frontend is two static files (<code>public/index.html</code> and <code>public/app.js</code>), so any static host works:",
+            steps: [
+                "Fork or clone the repository:",
+                "Deploy <code>public/</code> to GitHub Pages / Cloudflare Pages / Vercel (the repo ships a GitHub Action that publishes to the gh-pages branch on push)",
+                "Start with <code>--page https://your-url/</code> pointing at it",
+            ],
+            offline: "For LAN-only or offline use, <code>--no-page</code> makes this server deliver the page itself, with no external site involved.",
         };
     return `<!DOCTYPE html><html lang="${zh ? "zh" : "en"}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${t.title}</title>
@@ -177,11 +186,16 @@ a.btn{display:inline-block;padding:12px 20px;border-radius:10px;background:#2f6f
 text-decoration:none;font-size:1rem}a.btn:hover{background:#4480f5}
 .url{word-break:break-all;font-size:.8rem;color:#6b7383;margin-top:.75rem}
 .self{margin-top:2rem;padding-top:1.25rem;border-top:1px solid #2a2f3a;font-size:.9rem}
+.self strong{color:#e6e8ec}ol{margin:.5rem 0 1rem;padding-left:1.25rem;color:#aab2c0;line-height:1.7}
+li{margin-bottom:.35rem}a{color:#7ea6f5}
 code{background:#171b22;padding:2px 6px;border-radius:5px;font-size:.85em;color:#c3cad6}</style></head>
 <body><main><h1>${t.title}</h1><p>${t.lead}</p>
 <a class="btn" href="${escapeHtml(target)}">${t.open} →</a>
 <p class="url">${escapeHtml(target)}</p>
-<div class="self"><p><strong>${t.selfHostTitle}</strong><br>${t.selfHost} <code>--page &lt;url&gt;</code> ${t.selfHost2} <code>--no-page</code> ${t.selfHost3}</p></div>
+<div class="self"><p><strong>${t.selfHostTitle}</strong><br>${t.selfHostIntro}</p>
+<ol><li>${t.steps[0]} <a href="${REPO_URL}" target="_blank" rel="noopener noreferrer">${REPO_URL.replace("https://", "")}</a></li>
+<li>${t.steps[1]}</li><li>${t.steps[2]}</li></ol>
+<p>${t.offline}</p></div>
 </main></body></html>`;
 }
 
