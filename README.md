@@ -83,7 +83,7 @@ this one is for laptops rather than phones.
 **With a shell on the device**
 
 ```bash
-npx tango-mirror --tunnel --shell
+npx tango-mirror --shell
 ```
 
 Adds a `>_` button opening a real terminal on the device. This one requires
@@ -99,7 +99,7 @@ the token that's printed at startup — it's already embedded in the links.
 | Hear the device | Click 🔇 (audio only flows in P2P mode) |
 | Use a different port | `--port 9000` |
 | Keep the same URL across restarts | The default signaling link already is; among tunnels, `--tunnel tunwg` gives one too |
-| Keep video off the tunnel when P2P fails | Add a TURN relay, e.g. `--turn cloudflare` — see [TURN](#turn-keeping-the-fallback-off-your-relay) |
+| Reach viewers behind CGNAT / symmetric NAT | Add a TURN relay: `--turn cloudflare` — see [TURN](#turn) |
 | Lock down viewing too, not just the shell | `--token yoursecret` |
 | Run without any external site | `--no-page` (serves the UI itself) |
 
@@ -145,11 +145,24 @@ message. A missing binary means `tunwg`/`cloudflared` isn't installed; an
 unreachable relay means you should try `--tunnel-api <host>`. Local serving
 keeps working either way.
 
-**Stuck on `WS` instead of `P2P`** — WebRTC couldn't establish a direct path
-(symmetric NAT or CGNAT on one side). Everything still works through the
-tunnel, just with more latency and tunnel traffic. A TURN relay
-([`--turn`](#turn-keeping-the-fallback-off-your-relay)) usually gets such
-connections onto WebRTC anyway.
+**The page asks for a backend address** — you opened a `#k` link with a
+stale cached page (deploys lag pushes by a minute or two, and CDNs cache).
+Force-reload (`Ctrl+Shift+R`) or try a private window; an up-to-date page
+never asks on `#k` links.
+
+**`P2P failed` on a `#k` link** — WebRTC couldn't punch through (symmetric
+NAT or CGNAT on both ends), and signaling mode has no WebSocket fallback.
+Add [`--turn`](#turn) on the host — TURN reaches every NAT — or switch to
+`--tunnel`.
+
+**`Can't reach the host` on a `#k` link** — the host isn't running or has
+no broker connectivity. Check its console; the link must match the one it
+currently prints.
+
+**Stuck on `WS` instead of `P2P`** (tunnel mode) — WebRTC couldn't establish
+a direct path. Everything still works through the tunnel, just with more
+latency and tunnel traffic; [`--turn`](#turn) usually gets such connections
+onto WebRTC anyway.
 
 **Shell button missing** — the server wasn't started with `--shell`, or the
 page was opened without the token. Use the link printed at startup.
@@ -163,8 +176,8 @@ clear a stale cached bundle.
 ## How it works
 
 ```
-browser ──HTTPS/WSS──▶ tunnel ──▶ tango-mirror (Node) ──▶ adb ──▶ device
-   ╰────────── WebRTC: video, audio, touch, shell ──────────╯
+browser ◀── signaling: brokers or tunnel ──▶ tango-mirror (Node) ──▶ adb ──▶ device
+   ╰────────────── WebRTC: video, audio, touch, shell ──────────────╯
 ```
 
 tango-mirror pushes the stock scrcpy v3.1 server to the device and starts it
@@ -172,12 +185,14 @@ through adb, then relays what comes back. The device's hardware H.264 encoder
 output is **never transcoded** — it's repacketized as RTP and sent over
 WebRTC, or framed over the WebSocket as a fallback.
 
-The browser first connects over WebSocket (through the tunnel) and decodes
-with WebCodecs. In parallel it negotiates WebRTC using that WebSocket for
-signaling; once a peer-to-peer path is up, video switches to it and the
-WebSocket stream pauses. Touch, keys and the shell move to DataChannels. If
-ICE fails or the connection drops, everything falls back automatically — the
-status badge shows which path is live.
+How browser and host first meet depends on the mode. On a `#k` link (the
+default) they exchange SDP/ICE through the encrypted broker room and media
+starts directly on WebRTC. Through a tunnel (or on localhost) the browser
+connects over WebSocket first, decodes with WebCodecs for instant video,
+and negotiates WebRTC in parallel — once the peer-to-peer path is up, video
+switches over and the WebSocket stream pauses; if ICE fails or drops,
+everything falls back automatically. Touch, keys and the shell ride
+DataChannels either way, and the status badge shows which path is live.
 
 Because the media never touches the tunnel in P2P mode, bandwidth-limited or
 end-to-end-encrypted relays remain practical. For the same reason the page
@@ -195,9 +210,67 @@ never in a URL query, and is compared in constant time. With the tunwg
 backend the relay cannot read any of it — the tunnel is end-to-end encrypted
 and it only routes TLS bytes by SNI.
 
+On `#k` links the key in the fragment is the room secret: it never reaches
+any server (fragments aren't sent in requests), it derives the broker topic
+one-way, and it encrypts every signaling message. Possession of the link
+grants viewing — the same trust model as a tunnel URL — while the shell
+still demands the token.
+
+### Serverless signaling
+
+A remote viewer needs two small things before WebRTC can take over: a URL
+to open, and a way to exchange a few KB of SDP/ICE. Signaling provides
+both without any tunnel, and it is the default mode — plain `tango-mirror`
+runs it, `--no-signal` turns it off, and asking for a `--tunnel` replaces
+it (explicit `--signal` keeps both).
+
+The printed link is `<page>#k=<key>`. The key is generated locally and kept
+in `~/.config/tango-mirror/`, so the link is stable across restarts — and
+because it travels in the URL fragment, it is never sent to any server. Host
+and page meet on public MQTT brokers (EMQX intl + CN, HiveMQ by default;
+override with `--signal-broker`), where every message is AES-256-GCM
+encrypted with that key and the topic is a one-way hash of it. Brokers see
+ciphertext and timing, nothing else.
+
+Only session control rides the brokers. Media is WebRTC-only on this path —
+there is no WebSocket video fallback, so pair it with `--turn` if your
+viewers may sit behind symmetric NAT or CGNAT. Compared to the tunnel
+backends: no process to install, no relay anyone pays for, a stable link,
+and end-to-end encryption; the trade-offs are a couple of seconds of extra
+connect time and the WebRTC requirement.
+
+### TURN
+
+`--turn` gives WebRTC a relay for the NAT combinations it can't punch
+through (symmetric NAT or CGNAT on both ends). It matters twice: on the
+default signaling path it is the difference between "no video" and "video
+everywhere", and in tunnel mode it keeps fallback video off the tunnel —
+which otherwise carries the full stream, on your own bandwidth bill if the
+relay is yours:
+
+```bash
+# Cloudflare TURN (1,000 GB/month free): create a TURN key under
+# Realtime → TURN in the Cloudflare dashboard, then
+CF_TURN_KEY_ID=… CF_TURN_API_TOKEN=… tango-mirror --turn cloudflare
+```
+
+`--turn` takes two forms: `cloudflare`, which mints short-lived credentials
+on demand, or a `turn:`/`turns:` URL plus `--turn-auth user:pass` for your
+own coturn or any provider that hands out static credentials (Metered,
+ExpressTURN, …). Either way the credentials ride to the browser with the
+WebRTC offer — nothing to configure on the viewing side.
+
+Media through TURN stays DTLS-encrypted end to end; the relay forwards
+packets it cannot read, so a third-party TURN service gets no eyes on your
+screen. There is no default TURN server — the once-popular free public
+relays (Open Relay and friends) are dead.
+
 ### Tunnel backends
 
-Bare `--tunnel` picks cloudflared when both are installed.
+Tunnels are the explicit alternative (`--tunnel`) for when signaling can't
+serve: networks where WebRTC is blocked outright (the WebSocket fallback
+shows video through the tunnel), or when you want a plain HTTPS URL. Bare
+`--tunnel` picks cloudflared when both are installed.
 
 - **[cloudflared](https://github.com/cloudflare/cloudflared/releases)**
   (default) — zero setup, nothing to host and no traffic bill: Cloudflare's
@@ -215,56 +288,6 @@ Bare `--tunnel` picks cloudflared when both are installed.
   accounts, nothing hosted. tango-mirror runs `wush serve` with ssh/cp
   disabled, so the printed key only grants port-forwarding — still, treat
   it like a password while the server runs.
-
-### TURN: keeping the fallback off your relay
-
-When WebRTC can't find a direct path (symmetric NAT or CGNAT), video falls
-back to the WebSocket — and the full stream rides the tunnel. If that
-tunnel is a tunwg relay you host, that's your bandwidth bill. Point
-`--turn` at a TURN server and the fallback stays on WebRTC instead:
-
-```bash
-# Cloudflare TURN (1,000 GB/month free): create a TURN key under
-# Realtime → TURN in the Cloudflare dashboard, then
-CF_TURN_KEY_ID=… CF_TURN_API_TOKEN=… tango-mirror --tunnel --turn cloudflare
-```
-
-`--turn` takes two forms: `cloudflare`, which mints short-lived credentials
-on demand, or a `turn:`/`turns:` URL plus `--turn-auth user:pass` for your
-own coturn or any provider that hands out static credentials (Metered,
-ExpressTURN, …). Either way the credentials ride to the browser with the
-WebRTC offer — nothing to configure on the viewing side.
-
-Media through TURN stays DTLS-encrypted end to end; the relay forwards
-packets it cannot read, so a third-party TURN service gets no eyes on your
-screen. There is no default TURN server — the once-popular free public
-relays (Open Relay and friends) are dead.
-
-### Serverless signaling
-
-In P2P mode a tunnel does two small jobs: give the browser a URL, and carry
-a few KB of SDP/ICE. Signaling does both without any tunnel, and it is the
-default mode — plain `tango-mirror` runs it, `--no-signal` turns it off,
-and asking for a `--tunnel` replaces it (explicit `--signal` keeps both):
-
-```bash
-tango-mirror --turn cloudflare
-```
-
-The printed link is `<page>#k=<key>`. The key is generated locally and kept
-in `~/.config/tango-mirror/`, so the link is stable across restarts — and
-because it travels in the URL fragment, it is never sent to any server. Host
-and page meet on public MQTT brokers (EMQX intl + CN, HiveMQ by default;
-override with `--signal-broker`), where every message is AES-256-GCM
-encrypted with that key and the topic is a one-way hash of it. Brokers see
-ciphertext and timing, nothing else.
-
-Only session control rides the brokers. Media is WebRTC-only on this path —
-there is no WebSocket video fallback, so pair it with `--turn` if your
-viewers may sit behind symmetric NAT or CGNAT. Compared to the tunnel
-backends: no process to install, no relay anyone pays for, a stable link,
-and end-to-end encryption; the trade-offs are a couple of seconds of extra
-connect time and the WebRTC requirement.
 
 ### Hosting the frontend yourself
 
