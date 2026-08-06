@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>tango-mirror</title>
+<style>
+    * { box-sizing: border-box; }
+    html, body {
+        margin: 0;
+        height: 100dvh;
+        overflow: hidden;
+        overscroll-behavior: none;
+        background: #0f1115;
+        color: #e6e8ec;
+        font-family: system-ui, -apple-system, sans-serif;
+        -webkit-tap-highlight-color: transparent;
+    }
+    body { display: flex; flex-direction: column; }
+
+    /* ── top bar ───────────────────────────────── */
+    #topbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        padding-top: max(8px, env(safe-area-inset-top));
+        flex: none;
+    }
+    #device-select, #quality-select {
+        min-width: 0;
+        height: 40px;
+        padding: 0 10px;
+        border-radius: 10px;
+        border: 1px solid #2a2f3a;
+        background: #171b22;
+        color: inherit;
+        font-size: 15px;
+        appearance: none;
+    }
+    #device-select { flex: 1; }
+    #quality-select { flex: none; }
+    .iconbtn {
+        flex: none;
+        width: 40px;
+        height: 40px;
+        border-radius: 10px;
+        border: 1px solid #2a2f3a;
+        background: #171b22;
+        color: #e6e8ec;
+        font-size: 17px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        touch-action: manipulation;
+    }
+    .iconbtn:active { background: #232a36; }
+    a.iconbtn { text-decoration: none; color: #aab2c0; }
+    a.iconbtn:hover { color: #e6e8ec; }
+
+    /* ── status badge overlays the stage ───────── */
+    #stage-wrap {
+        flex: 1;
+        min-height: 0;
+        position: relative;
+        display: flex;
+    }
+    #status-badge {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 5;
+        max-width: 80%;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: rgba(15, 17, 21, .72);
+        backdrop-filter: blur(6px);
+        font-size: 12px;
+        line-height: 1.4;
+        color: #aab2c0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        pointer-events: none;
+    }
+    #status-badge.p2p { color: #7ee2a8; }
+    #status-badge.error { color: #ff8f8f; pointer-events: auto; white-space: normal; }
+
+    /* ── stage ─────────────────────────────────── */
+    #stage {
+        flex: 1;
+        position: relative;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        overflow: hidden;
+        background: #000;
+    }
+    #stage:empty::before {
+        content: attr(data-empty-hint);
+        color: #4a5160;
+        font-size: 14px;
+    }
+    .screen {
+        max-width: 100%;
+        max-height: 100%;
+        width: auto;
+        height: 100%;
+        touch-action: none;
+        object-fit: contain;
+        position: relative;
+        z-index: 1;
+    }
+    /* P2P video sits visible underneath the canvas so Chrome keeps its
+       render pipeline warm; switching just removes the canvas on top */
+    .screen-video {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        z-index: 0;
+        touch-action: none;
+    }
+
+    /* ── shell panel ───────────────────────────── */
+    /* narrow/portrait: docked at the bottom. wide/landscape: docked to the
+       right, where a portrait device screen leaves the space unused */
+    body.with-shell #stage { margin-bottom: 55%; }
+    #shell-panel {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 55%;
+        z-index: 6;
+        display: flex;
+        flex-direction: column;
+        background: #0f1115;
+        border-top: 1px solid #2a2f3a;
+        box-shadow: 0 -8px 24px rgba(0, 0, 0, .5);
+    }
+    @media (min-aspect-ratio: 1/1) and (min-width: 640px) {
+        /* clean vertical split: the shell takes the right column full height,
+           and everything belonging to the screen — including the nav and
+           keyboard bars — stays centred within the left column */
+        body.with-shell #stage { margin-bottom: 0; }
+        body.with-shell #topbar,
+        body.with-shell #stage-wrap,
+        body.with-shell #kbdbar,
+        body.with-shell #navbar { margin-right: 50%; }
+        #shell-panel {
+            position: fixed;
+            left: auto;
+            top: 0;
+            bottom: 0;
+            right: 0;
+            width: 50%;
+            height: auto;
+            border-top: none;
+            border-left: 1px solid #2a2f3a;
+            box-shadow: -8px 0 24px rgba(0, 0, 0, .5);
+        }
+    }
+    #shell-panel[hidden] { display: none; }
+    #shell-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px 6px 12px;
+        border-bottom: 1px solid #2a2f3a;
+        font-size: 13px;
+        color: #aab2c0;
+    }
+    #shell-title { flex: 1; }
+    #shell-head .iconbtn { width: 32px; height: 32px; font-size: 14px; }
+    #terminal { flex: 1; min-height: 0; padding: 4px 0 4px 8px; }
+
+    /* ── keyboard input bar ────────────────────── */
+    #kbdbar {
+        display: flex;
+        gap: 8px;
+        padding: 8px 12px;
+        flex: none;
+        background: #12151b;
+        border-top: 1px solid #2a2f3a;
+    }
+    #kbdbar[hidden] { display: none; }
+    #kbd-input {
+        flex: 1;
+        min-width: 0;
+        height: 40px;
+        padding: 0 12px;
+        border-radius: 10px;
+        border: 1px solid #2a2f3a;
+        background: #171b22;
+        color: inherit;
+        font-size: 16px; /* ≥16px prevents iOS auto-zoom on focus */
+    }
+    #kbd-send {
+        flex: none;
+        height: 40px;
+        padding: 0 16px;
+        border-radius: 10px;
+        border: none;
+        background: #2f6fed;
+        color: #fff;
+        font-size: 15px;
+        touch-action: manipulation;
+    }
+
+    /* ── bottom Android-style nav ──────────────── */
+    #navbar {
+        display: flex;
+        flex: none;
+        background: #12151b;
+        border-top: 1px solid #2a2f3a;
+        padding-bottom: env(safe-area-inset-bottom);
+    }
+    #navbar button {
+        flex: 1;
+        height: 52px;
+        border: none;
+        background: none;
+        color: #aab2c0;
+        font-size: 19px;
+        touch-action: manipulation;
+    }
+    #navbar button:active { color: #fff; background: #1b202a; }
+    #navbar button.accent { color: #7ea6f5; }
+</style>
+</head>
+<body>
+<header id="topbar">
+    <select id="device-select"></select>
+    <select id="quality-select" title="画质">
+        <option value="auto">自动</option>
+        <option value="low">流畅</option>
+        <option value="medium">平衡</option>
+        <option value="high">高清</option>
+    </select>
+    <button id="btn-mute" class="iconbtn" title="声音">🔇</button>
+    <button id="refresh" class="iconbtn" title="刷新设备列表">⟳</button>
+    <button id="btn-fullscreen" class="iconbtn" title="全屏">⛶</button>
+    <button id="btn-settings" class="iconbtn" title="后端地址">⚙</button>
+    <a id="btn-github" class="iconbtn" href="https://github.com/tiann/tango-mirror"
+       target="_blank" rel="noopener noreferrer" title="GitHub">
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+    </a>
+</header>
+<div id="stage-wrap">
+    <div id="stage"></div>
+    <span id="status-badge" hidden></span>
+    <section id="shell-panel" hidden>
+        <div id="shell-head">
+            <span id="shell-title">shell</span>
+            <button id="shell-close" class="iconbtn">✕</button>
+        </div>
+        <div id="terminal"></div>
+    </section>
+</div>
+<div id="kbdbar" hidden>
+    <input id="kbd-input" placeholder="输入文字，回车发送到设备" autocomplete="off" autocapitalize="off">
+    <button id="kbd-send">发送</button>
+</div>
+<nav id="navbar">
+    <button id="btn-power" title="电源">⏻</button>
+    <button id="btn-back" title="返回">◁</button>
+    <button id="btn-home" title="主页">◯</button>
+    <button id="btn-recents" title="最近任务">▢</button>
+    <button id="btn-kbd" class="accent" title="键盘">⌨</button>
+    <button id="btn-shell" class="accent" title="Shell" hidden>&gt;_</button>
+</nav>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
